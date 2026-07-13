@@ -40,8 +40,8 @@ services:
       APP_ENV: ${APP_ENV:-production}
       APP_HOST: 0.0.0.0
       APP_PORT: 8000
-      # 前端默认经由 8080 访问，因此这里允许该来源跨域
-      APP_CORS_ORIGINS: ${APP_CORS_ORIGINS:-http://localhost:8080}
+      # 前端默认经由 18080 访问，因此这里允许该来源跨域
+      APP_CORS_ORIGINS: ${APP_CORS_ORIGINS:-http://localhost:18080}
       # 容器内通过服务名 postgres 访问数据库，而不是 localhost
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
@@ -61,8 +61,8 @@ services:
       # 统一把运行期文件写入容器内 /data/storage，再映射到宿主机 ./storage
       STORAGE_ROOT: /data/storage
     ports:
-      # 保留 8000 端口，便于直接访问 Swagger/health 接口
-      - "8000:8000"
+      # 使用 18000 映射后端，避免与宿主机已有 8000 端口冲突
+      - "18000:8000"
     shm_size: "8gb"
     volumes:
       # 训练产物、上传文件、任务状态等运行数据持久化到宿主机
@@ -74,11 +74,11 @@ services:
       context: ./frontend
     container_name: ai-platform-frontend
     depends_on:
-      # 仅要求后端容器先启动，不再依赖定期健康检查
+      # 仅要求后端容器先启动，不依赖后端健康检查
       - backend
     ports:
-      # 统一从 8080 访问整个平台
-      - "8080:80"
+      # 统一从 18080 访问整个平台
+      - "18080:80"
 
 volumes:
   # Docker 管理的命名卷，用于持久化 PostgreSQL 数据目录

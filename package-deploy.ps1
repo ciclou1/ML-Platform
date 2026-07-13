@@ -17,7 +17,7 @@ $stagingRoot = Join-Path (
 ) ("ai-platform-package-" + [System.Guid]::NewGuid().ToString("N"))
 $stagingProject = Join-Path $stagingRoot "ai-platform"
 
-$excludeDirNames = @(
+$excludeRelativeDirPaths = @(
     ".git",
     ".agents",
     ".claude",
@@ -25,16 +25,19 @@ $excludeDirNames = @(
     ".uv-cache",
     ".idea",
     ".vscode",
+    "storage",
+    "frontend/dist",
+    "YOLOconstructionSiteSeftyDetector-main"
+)
+
+$globalExcludeDirNames = @(
+    "node_modules",
+    ".venv",
+    "venv",
     "__pycache__",
     ".pytest_cache",
     ".mypy_cache",
-    ".ruff_cache",
-    "node_modules",
-    "dist",
-    "storage",
-    "YOLOconstructionSiteSeftyDetector-main",
-    ".venv",
-    "venv"
+    ".ruff_cache"
 )
 
 $excludeFileNames = @(
@@ -58,10 +61,23 @@ $excludeNamePatterns = @(
 
 function Test-ExcludedPath {
     param(
-        [System.IO.FileSystemInfo]$Item
+        [System.IO.FileSystemInfo]$Item,
+        [string]$RelativePath = ""
     )
 
-    if ($Item.PSIsContainer -and $excludeDirNames -contains $Item.Name) {
+    $normalizedRelativePath = $RelativePath.Replace("\", "/")
+
+    if (
+        $Item.PSIsContainer -and
+        $globalExcludeDirNames -contains $Item.Name
+    ) {
+        return $true
+    }
+
+    if (
+        $Item.PSIsContainer -and
+        $excludeRelativeDirPaths -contains $normalizedRelativePath
+    ) {
         return $true
     }
 
@@ -85,20 +101,29 @@ function Test-ExcludedPath {
 function Copy-ProjectItem {
     param(
         [string]$SourcePath,
-        [string]$TargetPath
+        [string]$TargetPath,
+        [string]$RelativePath = ""
     )
 
     $item = Get-Item -LiteralPath $SourcePath -Force
-    if (Test-ExcludedPath -Item $item) {
+    if (Test-ExcludedPath -Item $item -RelativePath $RelativePath) {
         return
     }
 
     if ($item.PSIsContainer) {
         New-Item -ItemType Directory -Path $TargetPath -Force | Out-Null
         foreach ($child in Get-ChildItem -LiteralPath $item.FullName -Force) {
+            $childRelativePath = if ([string]::IsNullOrEmpty($RelativePath)) {
+                $child.Name
+            }
+            else {
+                Join-Path $RelativePath $child.Name
+            }
+
             Copy-ProjectItem `
                 -SourcePath $child.FullName `
-                -TargetPath (Join-Path $TargetPath $child.Name)
+                -TargetPath (Join-Path $TargetPath $child.Name) `
+                -RelativePath $childRelativePath
         }
         return
     }
@@ -127,7 +152,8 @@ try {
     foreach ($child in Get-ChildItem -LiteralPath $projectRoot -Force) {
         Copy-ProjectItem `
             -SourcePath $child.FullName `
-            -TargetPath (Join-Path $stagingProject $child.Name)
+            -TargetPath (Join-Path $stagingProject $child.Name) `
+            -RelativePath $child.Name
     }
 
     if (Test-Path -LiteralPath $packagePath) {

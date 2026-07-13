@@ -58,8 +58,12 @@
         <ImageList
           :images="imagesWithStatus"
           :selected-id="selectedImageId"
+          :total-count="totalImageCount"
+          :has-more="hasMoreImages"
+          :loading-more="isLoadingMoreImages"
           @select="handleImageSelect"
           @delete="handleImageDelete"
+          @load-more="loadMoreImages"
         />
       </div>
 
@@ -139,11 +143,15 @@ const {
   draftStore,
   annotatedCount,
   totalBoxCount,
+  totalImageCount,
   imagesWithStatus,
   hasPreviousImage,
   hasNextImage,
+  hasMoreImages,
+  isLoadingMoreImages,
   loadDatasetOptions,
   loadData,
+  loadMoreImages,
   restoreSelection,
   handleSelectImage,
   handleSelectLabel,

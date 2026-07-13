@@ -1,18 +1,18 @@
 支持的数据集 ZIP 结构示例（推荐）
 
-请将下面这类目录结构整体压缩为一个 .zip 文件后上传：
+推荐上传 YOLO 检测标准 ZIP：
 
 helmet_dataset.zip
-└── data.yaml
-└── images
-    ├── train
-    │   ├── 0001.jpg
-    │   └── 0002.jpg
-    ├── val
-    │   ├── 0101.jpg
-    │   └── 0102.jpg
-    └── test
-        └── 0201.jpg
+├── data.yaml
+├── images
+│   ├── train
+│   │   ├── 0001.jpg
+│   │   └── 0002.jpg
+│   ├── val
+│   │   ├── 0101.jpg
+│   │   └── 0102.jpg
+│   └── test
+│       └── 0201.jpg
 └── labels
     ├── train
     │   ├── 0001.txt
@@ -24,7 +24,6 @@ helmet_dataset.zip
         └── 0201.txt
 
 data.yaml 示例：
-
 train: images/train
 val: images/val
 test: images/test
@@ -34,9 +33,10 @@ names:
   1: person
 
 说明：
-1. 推荐使用 YOLO 格式。
-2. 平台会优先识别 data.yaml。
-3. 验证集目录可使用 val，也可使用 valid。
-4. 图片与标签文件名需要一一对应，例如 0001.jpg 对应 0001.txt。
-5. 标签文件内容需符合 YOLO 标注格式：
+1. 推荐使用 YOLO 标准目录结构，平台会优先识别 data.yaml。
+2. 没有 data.yaml 也可以上传，只要 ZIP 内能识别到图片。
+3. 如果没有类别信息，也可以先导入，后续在标注工作台新增类别并完成标注。
+4. 如果没有明确的 train/val/test，系统会尽量自动识别；无法区分时会按默认导入逻辑处理。
+5. 图片与标签文件名需要一一对应，例如 0001.jpg 对应 0001.txt。
+6. YOLO 标签文件内容格式为：
    class x_center y_center width height

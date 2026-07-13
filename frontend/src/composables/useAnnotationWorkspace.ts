@@ -41,6 +41,7 @@ function annotationToBox(annotation: Annotation, labels: WorkspaceLabelItem[]): 
 }
 
 export function useAnnotationWorkspace(datasetId: { value: string }) {
+  const pageSize = 50
   const draftStoreApi = useAnnotationDraftStore()
 
   const datasetOptions = ref<WorkspaceDatasetOption[]>([])
@@ -52,10 +53,25 @@ export function useAnnotationWorkspace(datasetId: { value: string }) {
   const currentAnnotations = ref<AnnotationViewData[]>([])
   const currentLabel = ref<WorkspaceLabelItem | null>(null)
   const persistedBoxes = ref<Map<string, BBox[]>>(new Map())
+  const currentPage = ref(1)
+  const hasMoreImages = ref(false)
+  const isLoadingMoreImages = ref(false)
 
   const draftStore = computed<DraftStore>(() => {
     const entries = Object.entries(draftStoreApi.datasetDrafts(datasetId.value))
     return new Map(entries)
+  })
+
+  const totalImageCount = computed(() => {
+    if (!datasetDetail.value) {
+      return 0
+    }
+
+    return (
+      Number(datasetDetail.value.train_count || 0) +
+      Number(datasetDetail.value.val_count || 0) +
+      Number(datasetDetail.value.test_count || 0)
+    )
   })
 
   const annotatedCount = computed(() =>
@@ -99,31 +115,40 @@ export function useAnnotationWorkspace(datasetId: { value: string }) {
   async function loadData() {
     try {
       const [imageList, labelList, dataset] = await Promise.all([
-        getDatasetImages(datasetId.value),
+        getDatasetImages(datasetId.value, { page: 1, page_size: pageSize }),
         getDatasetLabels(datasetId.value),
         getDataset(datasetId.value),
       ])
+
+      persistedBoxes.value = new Map()
       images.value = imageList
       labels.value = labelList
       datasetDetail.value = dataset
+      currentPage.value = 1
+      hasMoreImages.value = imageList.length < totalImageCount.value
+
       if (labels.value.length > 0) {
         currentLabel.value = labels.value[0]
       } else {
         currentLabel.value = null
       }
-      await loadPersistedAnnotations()
+
+      await loadPersistedAnnotationsForImages(imageList)
       restoreSelection()
     } catch {
       datasetDetail.value = null
       images.value = []
       labels.value = []
       persistedBoxes.value = new Map()
+      currentPage.value = 1
+      hasMoreImages.value = false
+      isLoadingMoreImages.value = false
     }
   }
 
-  async function loadPersistedAnnotations() {
+  async function loadPersistedAnnotationsForImages(imageList: WorkspaceImageItem[]) {
     const entries: Array<[string, BBox[]]> = await Promise.all(
-      images.value.map(async (image) => {
+      imageList.map(async (image) => {
         try {
           const annotations = await getAnnotations(image.id)
           return [
@@ -135,7 +160,34 @@ export function useAnnotationWorkspace(datasetId: { value: string }) {
         }
       }),
     )
-    persistedBoxes.value = new Map(entries)
+    persistedBoxes.value = new Map([...persistedBoxes.value.entries(), ...entries])
+  }
+
+  async function loadMoreImages() {
+    if (!datasetId.value || !hasMoreImages.value || isLoadingMoreImages.value) {
+      return
+    }
+
+    isLoadingMoreImages.value = true
+    try {
+      const nextPage = currentPage.value + 1
+      const nextImages = await getDatasetImages(datasetId.value, {
+        page: nextPage,
+        page_size: pageSize,
+      })
+
+      if (nextImages.length === 0) {
+        hasMoreImages.value = false
+        return
+      }
+
+      images.value = [...images.value, ...nextImages]
+      currentPage.value = nextPage
+      hasMoreImages.value = images.value.length < totalImageCount.value
+      await loadPersistedAnnotationsForImages(nextImages)
+    } finally {
+      isLoadingMoreImages.value = false
+    }
   }
 
   function restoreSelection() {
@@ -217,7 +269,7 @@ export function useAnnotationWorkspace(datasetId: { value: string }) {
       handleSelectImage(nextImage)
       return
     }
-    ElMessage.info('当前数据集图片都已经有标注或草稿')
+    ElMessage.info('当前已加载的图片都已有标注或草稿')
   }
 
   function clearDatasetDraft() {
@@ -242,11 +294,15 @@ export function useAnnotationWorkspace(datasetId: { value: string }) {
     draftStore,
     annotatedCount,
     totalBoxCount,
+    totalImageCount,
     imagesWithStatus,
     hasPreviousImage,
     hasNextImage,
+    hasMoreImages,
+    isLoadingMoreImages,
     loadDatasetOptions,
     loadData,
+    loadMoreImages,
     restoreSelection,
     handleSelectImage,
     handleSelectLabel,

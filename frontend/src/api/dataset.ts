@@ -23,7 +23,7 @@ export function deleteDataset(id: string) {
 
 export function getDatasetImages(
   id: string,
-  params?: { page?: number; page_size?: number }
+  params?: { page?: number; page_size?: number; split?: string }
 ) {
   return request.get<never, DatasetImage[]>(`/datasets/${id}/images`, { params })
 }

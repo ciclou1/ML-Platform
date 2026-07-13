@@ -1,6 +1,6 @@
 <template>
   <div class="image-list">
-    <h4>图片列表 ({{ images.length }})</h4>
+    <h4>图片列表 ({{ images.length }} / {{ totalCount }})</h4>
     <div
       v-for="image in images"
       :key="image.id"
@@ -23,6 +23,11 @@
         </div>
       </div>
     </div>
+    <div v-if="hasMore" class="load-more">
+      <el-button size="small" :loading="loadingMore" @click="emit('load-more')">
+        {{ loadingMore ? '加载中...' : '加载更多' }}
+      </el-button>
+    </div>
     <p v-if="images.length === 0" class="empty">暂无图片</p>
   </div>
 </template>
@@ -33,11 +38,15 @@ import type { WorkspaceImageListItem } from '@/types/annotation-workspace'
 defineProps<{
   images: WorkspaceImageListItem[]
   selectedId: string
+  totalCount: number
+  hasMore: boolean
+  loadingMore: boolean
 }>()
 
 const emit = defineEmits<{
-  select: [image: WorkspaceImageListItem]
-  delete: [image: WorkspaceImageListItem]
+  (e: 'select', image: WorkspaceImageListItem): void
+  (e: 'delete', image: WorkspaceImageListItem): void
+  (e: 'load-more'): void
 }>()
 </script>
 
@@ -98,5 +107,11 @@ h4 {
   color: #999;
   font-size: 12px;
   text-align: center;
+}
+
+.load-more {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0 4px;
 }
 </style>

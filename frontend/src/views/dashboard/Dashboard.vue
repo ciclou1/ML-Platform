@@ -53,10 +53,31 @@ const statCards = reactive([
 ])
 
 const workflow = [
-  { num: '1', title: '上传数据', desc: '创建数据集并上传图片' },
-  { num: '2', title: '数据标注', desc: '使用标注工具标记目标' },
-  { num: '3', title: '模型训练', desc: '选择框架启动训练任务' },
-  { num: '4', title: '评估推理', desc: '验证模型效果并部署' },
+  {
+    num: '1',
+    title: '创建并导入数据集',
+    desc: '创建数据集并上传 ZIP，识别图片、标注与划分信息。',
+  },
+  {
+    num: '2',
+    title: '检查与补充标注',
+    desc: '在标注工作台检查类别与标注结果，补齐训练前数据。',
+  },
+  {
+    num: '3',
+    title: '创建数据集版本',
+    desc: '冻结当前数据范围并校验可训练性，生成可追溯的数据版本。',
+  },
+  {
+    num: '4',
+    title: '导出训练版本',
+    desc: '将版本导出为 YOLO 训练输入，生成 dataset.yaml 与划分结果。',
+  },
+  {
+    num: '5',
+    title: '发起训练并导出模型',
+    desc: '选择训练输入和预训练模型，启动训练并将最佳模型导入模型库。',
+  },
 ]
 </script>
 
@@ -94,7 +115,8 @@ const workflow = [
 
 .workflow {
   display: flex;
-  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 20px 12px;
   padding: 20px 0;
 }
 
@@ -103,7 +125,8 @@ const workflow = [
   flex-direction: column;
   align-items: center;
   text-align: center;
-  flex: 1;
+  flex: 1 1 180px;
+  min-width: 0;
 }
 
 .step-circle {
@@ -128,6 +151,7 @@ const workflow = [
   font-size: 12px;
   color: #909399;
   margin: 0;
+  line-height: 1.6;
 }
 
 .recent-tasks {
