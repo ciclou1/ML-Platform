@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.dataset import Dataset, Image
+from app.models.video import Video
 from app.repositories.base import BaseRepository
 
 
@@ -35,6 +36,13 @@ class ImageRepository(BaseRepository[Image]):
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_by_ids(self, image_ids: list[uuid.UUID]) -> list[Image]:
+        if not image_ids:
+            return []
+        stmt = select(Image).where(Image.id.in_(image_ids))
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def count_by_dataset_and_split(self, dataset_id: uuid.UUID, split: str) -> int:
         from sqlalchemy import func
 
@@ -45,3 +53,24 @@ class ImageRepository(BaseRepository[Image]):
         )
         result = await self.session.execute(stmt)
         return int(result.scalar_one() or 0)
+
+    async def delete_by_video(self, video_id: uuid.UUID) -> None:
+        await self.session.execute(Image.__table__.delete().where(Image.video_id == video_id))
+
+
+class VideoRepository(BaseRepository[Video]):
+    def __init__(self, session: AsyncSession) -> None:
+        super().__init__(session, Video)
+
+    async def list_by_dataset(
+        self, dataset_id: uuid.UUID, offset: int = 0, limit: int = 50
+    ) -> list[Video]:
+        stmt = (
+            select(Video)
+            .where(Video.dataset_id == dataset_id)
+            .order_by(Video.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())

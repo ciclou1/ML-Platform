@@ -17,28 +17,21 @@ class Settings(BaseSettings):
     postgres_password: str = "changeme"
     postgres_pool_size: int = 10
 
-    doris_host: str = "localhost"
-    doris_port: int = 9030
-    doris_db: str = "ai_platform_olap"
-    doris_user: str = "root"
-    doris_password: str = ""
-
     storage_backend: str = "local"
-    storage_root: str = "E:/pythonas/plat/storage"
+    storage_root: str = "./storage"
     max_upload_size_mb: int = 500
+
+    jwt_secret: str = "dev-only-secret-change-in-production"
+    jwt_expire_minutes: int = 720
+
+    log_level: str = "INFO"
+    log_json: bool = True
 
     @property
     def postgres_url(self) -> str:
         return (
             f"postgresql+psycopg://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
-        )
-
-    @property
-    def doris_url(self) -> str:
-        return (
-            f"mysql+aiomysql://{self.doris_user}:{self.doris_password}"
-            f"@{self.doris_host}:{self.doris_port}/{self.doris_db}"
         )
 
     @property

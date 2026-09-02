@@ -1,4 +1,5 @@
 import request from './request'
+import { appendAccessToken } from './accessToken'
 import type { Dataset, DatasetImage } from '@/types/dataset'
 
 export function getDatasets(params?: { page?: number; page_size?: number }) {
@@ -9,7 +10,12 @@ export function getDataset(id: string) {
   return request.get<never, Dataset>(`/datasets/${id}`)
 }
 
-export function createDataset(data: { name: string; description?: string; data_type?: string }) {
+export function createDataset(data: {
+  name: string
+  description?: string
+  data_type?: string
+  annotation_types?: string[]
+}) {
   return request.post<never, Dataset>('/datasets', data)
 }
 
@@ -28,12 +34,16 @@ export function getDatasetImages(
   return request.get<never, DatasetImage[]>(`/datasets/${id}/images`, { params })
 }
 
+export function getDatasetImage(imageId: string) {
+  return request.get<never, DatasetImage>(`/datasets/images/${imageId}`)
+}
+
 export function deleteDatasetImage(imageId: string) {
   return request.delete(`/datasets/images/${imageId}`)
 }
 
 export function imageFileUrl(imageId: string): string {
-  return `/api/v1/datasets/images/${imageId}/file`
+  return appendAccessToken(`/api/v1/datasets/images/${imageId}/file`)
 }
 
 export function exportAnnotated(

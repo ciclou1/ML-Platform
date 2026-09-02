@@ -3,7 +3,7 @@ export interface Annotation {
   image_id: string
   label_id: string
   annotation_type: string
-  data: Record<string, number>
+  data: Record<string, unknown>
   label_name?: string
   color?: string
   created_at: string

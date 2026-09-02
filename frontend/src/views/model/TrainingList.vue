@@ -22,7 +22,7 @@
         </template>
       </el-table-column>
       <el-table-column prop="created_at" label="创建时间" width="180" />
-      <el-table-column label="操作" width="240">
+      <el-table-column label="操作" width="290">
         <template #default="{ row }">
           <el-button
             v-if="row.status === 'running'"
@@ -41,6 +41,15 @@
             @click="handleExport(row.id)"
           >
             导出
+          </el-button>
+          <el-button
+            v-if="row.task_type === 'training' && (row.status === 'failed' || row.status === 'cancelled')"
+            size="small"
+            type="warning"
+            link
+            @click="handleResume(row)"
+          >
+            续训
           </el-button>
           <el-button
             v-if="row.status === 'running' || row.status === 'completed' || row.status === 'failed'"
@@ -89,6 +98,8 @@ import {
   getTaskHistory,
   getTaskProgress,
   getTasks,
+  resumeTask,
+  startTask,
   syncTask,
 } from '@/api/task'
 import type {
@@ -255,6 +266,28 @@ async function handleExport(id: string) {
     loadTasks()
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : '导出失败'
+    ElMessage.error(message)
+  }
+}
+
+async function handleResume(task: Task) {
+  try {
+    await ElMessageBox.confirm(
+      '将从原任务断点创建续训任务并自动开始训练，确认继续？',
+      '断点续训',
+      { type: 'info' },
+    )
+  } catch {
+    return
+  }
+  try {
+    const newTask = await resumeTask(task.id)
+    await startTask(newTask.id)
+    ElMessage.success('续训任务已创建并启动')
+    loadTasks()
+    watchProgress(newTask.id)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : '续训失败'
     ElMessage.error(message)
   }
 }

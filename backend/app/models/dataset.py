@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDMixin
@@ -15,6 +15,8 @@ class Dataset(UUIDMixin, TimestampMixin, Base):
     description: Mapped[str | None] = mapped_column(Text)
     data_type: Mapped[str] = mapped_column(String(50), default="image")
     storage_path: Mapped[str | None] = mapped_column(String(500))
+    scene_category: Mapped[str | None] = mapped_column(String(50))
+    annotation_types: Mapped[list | None] = mapped_column(JSON)
     num_classes: Mapped[int] = mapped_column(Integer, default=0)
     train_count: Mapped[int] = mapped_column(Integer, default=0)
     val_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -32,6 +34,7 @@ class Label(UUIDMixin, TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     color: Mapped[str] = mapped_column(String(7), default="#FF0000")
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    skeleton: Mapped[dict | None] = mapped_column(JSON)
 
     dataset: Mapped[Dataset] = relationship(back_populates="labels")
 
@@ -46,6 +49,8 @@ class Image(UUIDMixin, TimestampMixin, Base):
     height: Mapped[int] = mapped_column(Integer, default=0)
     split: Mapped[str] = mapped_column(String(10), default="train")
     annotation_status: Mapped[str] = mapped_column(String(20), default="unannotated")
+    video_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("videos.id", ondelete="SET NULL"))
+    frame_index: Mapped[int | None] = mapped_column(Integer)
 
     dataset: Mapped[Dataset] = relationship(back_populates="images")
     annotations: Mapped[list[Annotation]] = relationship(

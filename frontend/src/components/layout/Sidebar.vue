@@ -12,7 +12,7 @@
       active-text-color="#409eff"
     >
       <SidebarItem
-        v-for="item in menuConfig"
+        v-for="item in filteredMenus"
         :key="item.path"
         :item="item"
       />
@@ -23,15 +23,29 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
-import { menuConfig } from '@/config/menu'
+import { menuConfig, type MenuItem } from '@/config/menu'
+import { useAuthStore } from '@/stores/auth'
 import SidebarItem from './SidebarItem.vue'
 
 const route = useRoute()
+const auth = useAuthStore()
+
+function visible(item: MenuItem): boolean {
+  if (item.permission && !auth.hasPermission(item.permission)) {
+    return false
+  }
+  if (item.children) {
+    return item.children.some(visible)
+  }
+  return true
+}
+
+const filteredMenus = computed(() => menuConfig.filter(visible))
 
 const activeMenu = computed(() => route.path)
 
 const openedMenus = computed(() =>
-  menuConfig.filter((m) => m.children?.length).map((m) => m.path)
+  filteredMenus.value.filter((m) => m.children?.length).map((m) => m.path)
 )
 </script>
 

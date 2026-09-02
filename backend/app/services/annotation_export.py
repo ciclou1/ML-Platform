@@ -9,6 +9,7 @@ from typing import Any
 import yaml
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.annotation_shapes import annotation_to_yolo_line, assert_exportable
 from app.core.dataset_files import (
     build_yolo_label_file_index,
     extract_class_names,
@@ -44,15 +45,20 @@ class AnnotationExportService:
         source = await self.dataset_repo.get_by_id(source_dataset_id)
         if not source:
             raise NotFoundError("Source dataset not found")
+        assert_exportable([str(item) for item in (source.annotation_types or [])])
 
         labels = await self.label_repo.list_by_dataset(source_dataset_id)
         existing_annotations = await self.annotation_repo.list_by_dataset(source_dataset_id)
+        annotation_types = await self._resolve_annotation_types(source, existing_annotations)
         class_names = self._resolve_class_names(source, labels)
         label_map = self._build_label_map(labels, class_names)
         images = await self.image_repo.list_by_dataset(
             source_dataset_id, offset=0, limit=10000
         )
-        image_lookup = {str(img.id): img for img in images}
+        if set(annotation_types) == {"classify"}:
+            return await self._export_classification_dataset(
+                source, labels, existing_annotations, images
+            )
         resolved_splits = {
             str(img.id): self._resolve_effective_split(img)
             for img in images
@@ -86,7 +92,11 @@ class AnnotationExportService:
                 target_dir=target_dir,
             )
 
-            yaml_path = self._write_data_yaml(target_dir, class_names)
+            yaml_path = self._write_data_yaml(
+                target_dir,
+                class_names,
+                kpt_shape=self._resolve_kpt_shape(labels, existing_annotations),
+            )
             self._validate_export_layout(target_dir, split_counts)
             self._clear_label_caches(target_dir)
         finally:
@@ -101,6 +111,73 @@ class AnnotationExportService:
         target_dataset.test_count = split_counts.get("test", 0)
 
         return await self.dataset_repo.update(target_dataset)
+
+    async def _export_classification_dataset(
+        self,
+        source: Dataset,
+        labels: list[Label],
+        annotations: list[Annotation],
+        images: list[Image],
+    ) -> Dataset:
+        class_names = self._resolve_class_names(source, labels)
+        target = await self._create_new_dataset(source, labels, class_names)
+        target_dir = StoragePaths.dataset_root(target.id)
+        label_names = {label.id: label.name for label in labels}
+        grouped = self._group_annotations_by_image(annotations)
+        counts: Counter[str] = Counter()
+        for image in images:
+            matches = [
+                item for item in grouped.get(image.id, []) if item.annotation_type == "classify"
+            ]
+            source_path = self._resolve_image_path(image.file_path)
+            if len(matches) != 1 or not source_path.exists():
+                continue
+            class_name = label_names.get(matches[0].label_id)
+            if not class_name:
+                continue
+            split = self._resolve_effective_split(image)
+            destination = target_dir / split / class_name / image.filename
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(shutil.copy2, source_path, destination)
+            counts[split] += 1
+            await self.image_repo.create(
+                Image(
+                    dataset_id=target.id,
+                    filename=image.filename,
+                    file_path=str(destination),
+                    split=split,
+                    width=image.width,
+                    height=image.height,
+                    annotation_status="annotated",
+                )
+            )
+        if not counts.get("train") or not counts.get("val"):
+            raise ValueError("Classification export requires annotated train and val images")
+        yaml_path = target_dir / "data.yaml"
+        yaml_path.write_text(yaml.safe_dump({"path": str(target_dir)}), encoding="utf-8")
+        target.storage_path = str(yaml_path)
+        target.status = "annotated"
+        target.num_classes = len(labels)
+        target.train_count, target.val_count, target.test_count = (
+            counts["train"],
+            counts["val"],
+            counts["test"],
+        )
+        return await self.dataset_repo.update(target)
+
+    async def _resolve_annotation_types(
+        self, source: Dataset, annotations: list[Annotation]
+    ) -> list[str]:
+        """标注类型优先取数据集字段；缺失时从已有标注推断并写回数据集。"""
+
+        declared = [str(item) for item in (source.annotation_types or [])]
+        if declared:
+            return declared
+        inferred = sorted({str(item.annotation_type) for item in annotations})
+        if inferred and inferred != [str(item) for item in (source.annotation_types or [])]:
+            source.annotation_types = inferred
+            await self.dataset_repo.update(source)
+        return inferred
 
     @staticmethod
     def _resolve_target_dir(source: Dataset, dataset_id: uuid.UUID) -> Path:
@@ -277,18 +354,20 @@ class AnnotationExportService:
 
         lines: list[str] = []
         for box in boxes:
-            bbox = box.get("bbox")
+            annotation_type = str(box.get("annotation_type") or "bbox")
+            payload = box.get("data") if isinstance(box.get("data"), dict) else box.get("bbox")
             label_id = box.get("label_id")
-            if not isinstance(bbox, dict) or not isinstance(label_id, str):
+            if not isinstance(payload, dict) or not isinstance(label_id, str):
                 continue
-            lines.append(
-                self._bbox_to_yolo_line(
-                    self._resolve_box_class_index(label_id, label_map),
-                    bbox,
-                    img_w,
-                    img_h,
-                )
+            line = annotation_to_yolo_line(
+                annotation_type,
+                payload,
+                self._resolve_box_class_index(label_id, label_map),
+                img_w,
+                img_h,
             )
+            if line:
+                lines.append(line)
         return lines
 
     def _build_label_lines_from_annotations(
@@ -310,9 +389,15 @@ class AnnotationExportService:
             class_idx = label_map.get(str(annotation.label_id))
             if class_idx is None:
                 continue
-            if not {"x", "y", "width", "height"}.issubset(payload):
-                continue
-            lines.append(self._bbox_to_yolo_line(class_idx, payload, img_w, img_h))
+            line = annotation_to_yolo_line(
+                annotation.annotation_type,
+                payload,
+                class_idx,
+                img_w,
+                img_h,
+            )
+            if line:
+                lines.append(line)
         return lines
 
     def _read_existing_label_lines(
@@ -521,29 +606,53 @@ class AnnotationExportService:
             return int(label_id)
         return 0
 
-    @staticmethod
-    def _bbox_to_yolo_line(
-        class_idx: int, bbox: dict[str, float], img_w: int, img_h: int
-    ) -> str:
-        x_center = (bbox["x"] + bbox["width"] / 2) / img_w
-        y_center = (bbox["y"] + bbox["height"] / 2) / img_h
-        w = bbox["width"] / img_w
-        h = bbox["height"] / img_h
-        return f"{class_idx} {x_center:.6f} {y_center:.6f} {w:.6f} {h:.6f}"
+    def _resolve_kpt_shape(
+        self,
+        labels: list[Label],
+        annotations: list[Annotation],
+    ) -> list[int] | None:
+        """pose 任务 data.yaml 的 kpt_shape: [点数, 3]，优先取标签骨架定义。"""
+
+        for label in labels:
+            skeleton = label.skeleton or {}
+            num_points = skeleton.get("num_points")
+            if isinstance(num_points, int) and num_points > 0:
+                return [num_points, 3]
+        for annotation in annotations:
+            if annotation.annotation_type != "keypoint":
+                continue
+            points = (annotation.data or {}).get("points")
+            if isinstance(points, list) and points:
+                return [len(points), 3]
+        return None
 
     @staticmethod
-    def _write_data_yaml(target_dir: Path, class_names: list[str]) -> Path:
+    def _write_data_yaml(
+        target_dir: Path,
+        class_names: list[str],
+        kpt_shape: list[int] | None = None,
+    ) -> Path:
         yaml_path = target_dir / "data.yaml"
+        has_train = _has_images(target_dir / "images" / "train")
+        has_val = _has_images(target_dir / "images" / "val")
         data: dict[str, Any] = {
             "path": str(target_dir),
             "names": dict(enumerate(class_names)),
             "nc": len(class_names),
-            "train": "images/train",
-            "val": "images/val",
+            # ultralytics 要求 yaml 同时含 train/val 键；缺失的划分回退到已有目录
+            "train": "images/train" if has_train else "images/val",
+            "val": "images/val" if has_val else "images/train",
         }
-        test_dir = target_dir / "images" / "test"
-        if test_dir.exists():
+        if _has_images(target_dir / "images" / "test"):
             data["test"] = "images/test"
+        if kpt_shape:
+            data["kpt_shape"] = kpt_shape
 
-        yaml_path.write_text(yaml.dump(data, allow_unicode=True))
+        yaml_path.write_text(yaml.dump(data, allow_unicode=True), encoding="utf-8")
         return yaml_path
+
+
+def _has_images(directory: Path) -> bool:
+    """目录存在且至少含一个文件时视为有效划分。"""
+
+    return directory.is_dir() and any(directory.iterdir())

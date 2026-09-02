@@ -1,10 +1,19 @@
 <template>
   <div class="image-canvas">
     <div class="toolbar">
-      <el-radio-group v-model="canvas.mode.value" size="small">
+      <el-radio-group v-if="canvas.shapeType.value !== 'classify'" v-model="canvas.mode.value" size="small">
         <el-radio-button value="draw">绘制</el-radio-button>
         <el-radio-button value="select">选择</el-radio-button>
       </el-radio-group>
+
+      <el-radio-group v-model="canvas.shapeType.value" size="small">
+        <el-radio-button value="bbox">框</el-radio-button>
+        <el-radio-button value="polygon">多边形</el-radio-button>
+        <el-radio-button value="obb">旋转框</el-radio-button>
+        <el-radio-button value="keypoint">关键点</el-radio-button>
+        <el-radio-button value="classify">分类</el-radio-button>
+      </el-radio-group>
+
       <el-button size="small" type="danger" :disabled="!canvas.selectedId.value" @click="handleDelete">
         删除标注
       </el-button>
@@ -21,11 +30,26 @@
         @mousedown="handleMouseDown"
         @mousemove="canvas.onMouseMove"
         @mouseup="canvas.onMouseUp"
-        @keydown.delete="handleDelete"
+        @dblclick="canvas.onDoubleClick"
+        @keydown="handleKeyDown"
       />
       <div v-if="!canDraw" class="canvas-mask">
         请先在右侧新增并选择类别，再开始标注。
       </div>
+    </div>
+
+    <div class="tool-hint">
+      {{
+        canvas.shapeType.value === 'classify'
+          ? '分类：点击右侧类别或单击画布，为整张图片打分类标签'
+          : canvas.shapeType.value === 'polygon'
+          ? '多边形：单击加点，双击或 Enter 闭合'
+          : canvas.shapeType.value === 'keypoint'
+            ? '关键点：先拖出包围框，再逐次单击放置关键点，Enter/双击结束'
+            : canvas.shapeType.value === 'obb'
+              ? '旋转框：拖拽创建，选中后拖动上方圆点旋转'
+              : '框：拖拽创建，选中后整体拖动'
+      }}
     </div>
   </div>
 </template>
@@ -33,7 +57,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useCanvas, type BBox } from '@/composables/useCanvas'
+import { useCanvas, type Shape } from '@/composables/useCanvas'
 import type { AnnotationViewData } from '@/types/annotation-workspace'
 
 const props = defineProps<{
@@ -44,7 +68,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  save: [boxes: BBox[]]
+  save: [shapes: Shape[]]
   delete: [annotationId: string]
 }>()
 
@@ -52,7 +76,14 @@ const canvasEl = ref<HTMLCanvasElement | null>(null)
 const canvas = useCanvas(canvasEl)
 
 defineExpose({
-  updateSelectedLabel: canvas.updateSelectedLabel,
+  updateSelectedLabel: (labelId: string, labelName: string, color: string) => {
+    if (canvas.shapeType.value === 'classify') {
+      // 分类模式：选择类别即为整图打标
+      canvas.setClassifyLabel(labelId, labelName, color)
+      return
+    }
+    canvas.updateSelectedLabel(labelId, labelName, color)
+  },
   selectMode: () => {
     canvas.mode.value = 'select'
   },
@@ -61,19 +92,25 @@ defineExpose({
   },
 })
 
-watch(() => props.imageSrc, async (src) => {
-  if (src) {
-    await canvas.loadImage(src)
-    canvas.mode.value = props.canDraw ? 'draw' : 'select'
-    loadAnnotations()
-  }
-})
+watch(
+  () => props.imageSrc,
+  async (src) => {
+    if (src) {
+      await canvas.loadImage(src)
+      canvas.mode.value = props.canDraw ? 'draw' : 'select'
+      loadAnnotations()
+    }
+  },
+)
 
-watch(() => props.currentLabel, (label) => {
-  if (label) {
-    canvas.setLabel(label.id, label.name, label.color)
-  }
-})
+watch(
+  () => props.currentLabel,
+  (label) => {
+    if (label) {
+      canvas.setLabel(label.id, label.name, label.color)
+    }
+  },
+)
 
 watch(
   () => props.canDraw,
@@ -87,17 +124,62 @@ watch(
 watch(() => props.annotations, loadAnnotations)
 
 function loadAnnotations() {
-  const boxes: BBox[] = props.annotations.map((annotation) => ({
+  const shapes: Shape[] = []
+  for (const annotation of props.annotations) {
+    const shape = annotationToShape(annotation)
+    if (shape) {
+      shapes.push(shape)
+    }
+  }
+  canvas.setShapes(shapes)
+}
+
+function annotationToShape(annotation: AnnotationViewData): Shape | null {
+  const base = {
     id: annotation.id,
+    labelId: annotation.label_id,
+    labelName: annotation.label_name,
+    color: annotation.color,
+  }
+  const data = annotation.data
+
+  if (annotation.annotation_type === 'classify') {
+    return { ...base, type: 'classify' }
+  }
+  if (annotation.annotation_type === 'polygon') {
+    if (!Array.isArray(data.points)) return null
+    return { ...base, type: 'polygon', points: data.points as [number, number][] }
+  }
+  if (annotation.annotation_type === 'obb') {
+    if (typeof data.cx !== 'number') return null
+    return {
+      ...base,
+      type: 'obb',
+      cx: data.cx,
+      cy: data.cy as number,
+      w: data.w as number,
+      h: data.h as number,
+      angle: typeof data.angle === 'number' ? data.angle : 0,
+    }
+  }
+  if (annotation.annotation_type === 'keypoint') {
+    const bbox = data.bbox as { x: number; y: number; width: number; height: number } | undefined
+    if (!bbox || !Array.isArray(data.points)) return null
+    return {
+      ...base,
+      type: 'keypoint',
+      bbox,
+      points: data.points as [number, number, number][],
+    }
+  }
+  return {
+    ...base,
+    type: 'bbox',
     x: annotation.bbox.x,
     y: annotation.bbox.y,
     width: annotation.bbox.width,
     height: annotation.bbox.height,
-    labelId: annotation.label_id,
-    labelName: annotation.label_name,
-    color: annotation.color,
-  }))
-  canvas.setBoxes(boxes)
+  }
 }
 
 function handleMouseDown(event: MouseEvent) {
@@ -106,6 +188,15 @@ function handleMouseDown(event: MouseEvent) {
     return
   }
   canvas.onMouseDown(event)
+}
+
+function handleKeyDown(event: KeyboardEvent) {
+  if (event.key === 'Delete' || event.key === 'Backspace') {
+    event.preventDefault()
+    handleDelete()
+    return
+  }
+  canvas.onKeyDown(event)
 }
 
 function handleDelete() {
@@ -117,7 +208,7 @@ function handleDelete() {
 }
 
 function handleSave() {
-  emit('save', canvas.boxes.value)
+  emit('save', canvas.shapes.value)
 }
 </script>
 
@@ -132,6 +223,7 @@ function handleSave() {
   display: flex;
   align-items: center;
   gap: 12px;
+  flex-wrap: wrap;
 }
 
 .canvas-wrap {
@@ -156,5 +248,11 @@ function handleSave() {
   text-align: center;
   padding: 24px;
   pointer-events: none;
+}
+
+.tool-hint {
+  color: #64748b;
+  font-size: 12px;
+  text-align: center;
 }
 </style>

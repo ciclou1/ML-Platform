@@ -6,16 +6,16 @@ from csv import DictReader
 from pathlib import Path
 from typing import Any
 
-from app.frameworks.base import BaseTrainer
 from app.core.storage.paths import StoragePaths
+from app.frameworks.base import BaseTrainer
 
 logger = logging.getLogger(__name__)
 
 
 class YOLOv8Trainer(BaseTrainer):
     async def train(self, config: dict[str, Any]) -> dict[str, Any]:
-        from ultralytics import YOLO
         import torch
+        from ultralytics import YOLO
 
         weight_path = config.get("weight_path")
         if not weight_path:
@@ -23,7 +23,12 @@ class YOLOv8Trainer(BaseTrainer):
         task_id = config.get("task_id", "standalone")
         run_name = config.get("run_name", "train")
         project_dir = config.get("project_dir", str(StoragePaths.run_root(task_id)))
+        model_task = config.get("model_task", "detect")
+        metrics_suffix = {"segment": "M", "pose": "P"}.get(str(model_task), "B")
         progress_file = config.get("progress_file")
+        resume_from = config.get("resume_from")
+        if resume_from and not Path(resume_from).exists():
+            raise ValueError(f"续训权重不存在: {resume_from}")
         workers = config.get("workers")
         if workers is None:
             # Windows multiprocessing can exhaust shared memory/pagefile during
@@ -34,7 +39,11 @@ class YOLOv8Trainer(BaseTrainer):
         if not device:
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        model = YOLO(weight_path)
+        if resume_from:
+            # 断点续训：从 last.pt 恢复，ultralytics 沿用原任务的超参与运行目录
+            model = YOLO(resume_from)
+        else:
+            model = YOLO(weight_path, task=model_task)
         history_file = (
             str(Path(progress_file).parent / "history.json")
             if progress_file
@@ -57,11 +66,13 @@ class YOLOv8Trainer(BaseTrainer):
                     epoch_data["train_loss"] = round(float(trainer_obj.loss.mean()), 4)
                 if hasattr(trainer_obj, "metrics") and trainer_obj.metrics:
                     epoch_data["map50"] = round(
-                        float(trainer_obj.metrics.get("metrics/mAP50(B)", 0)),
+                        float(trainer_obj.metrics.get(f"metrics/mAP50({metrics_suffix})", 0)),
                         4,
                     )
                     epoch_data["map50_95"] = round(
-                        float(trainer_obj.metrics.get("metrics/mAP50-95(B)", 0)),
+                        float(
+                            trainer_obj.metrics.get(f"metrics/mAP50-95({metrics_suffix})", 0)
+                        ),
                         4,
                     )
 
@@ -80,28 +91,42 @@ class YOLOv8Trainer(BaseTrainer):
         model.add_callback("on_train_epoch_end", _on_train_epoch_end)
 
         started_at = time.perf_counter()
-        results = model.train(
-            data=config["data_yaml_path"],
-            epochs=config.get("epochs", 50),
-            batch=config.get("batch_size", 16),
-            imgsz=config.get("img_size", 640),
-            patience=config.get("patience", 10),
-            optimizer=config.get("optimizer", "AdamW"),
-            lr0=config.get("lr0", 0.01),
-            warmup_epochs=config.get("warmup_epochs", 3),
-            cos_lr=config.get("cos_lr", False),
-            close_mosaic=config.get("close_mosaic", 10),
-            pretrained=config.get("pretrained", True),
-            workers=workers,
-            device=device,
-            project=project_dir,
-            name=run_name,
-            exist_ok=True,
-        )
+        plots = bool(config.get("plots", False))
+        if resume_from:
+            results = model.train(
+                resume=True,
+                workers=workers,
+                device=device,
+                plots=plots,
+            )
+        else:
+            results = model.train(
+                data=config["data_yaml_path"],
+                epochs=config.get("epochs", 50),
+                batch=config.get("batch_size", 16),
+                imgsz=config.get("img_size", 640),
+                patience=config.get("patience", 10),
+                optimizer=config.get("optimizer", "AdamW"),
+                lr0=config.get("lr0", 0.01),
+                warmup_epochs=config.get("warmup_epochs", 3),
+                cos_lr=config.get("cos_lr", False),
+                close_mosaic=config.get("close_mosaic", 10),
+                freeze=config.get("freeze"),
+                pretrained=config.get("pretrained", True),
+                workers=workers,
+                device=device,
+                project=project_dir,
+                name=run_name,
+                exist_ok=True,
+                plots=plots,
+            )
         train_duration_seconds = time.perf_counter() - started_at
 
-        best_weight = Path(project_dir) / run_name / "weights" / "best.pt"
-        results_csv = Path(project_dir) / run_name / "results.csv"
+        # resume 时 ultralytics 会写回原任务的运行目录，优先取 trainer.save_dir
+        trainer_save_dir = getattr(getattr(model, "trainer", None), "save_dir", None)
+        run_dir = Path(trainer_save_dir) if trainer_save_dir else Path(project_dir) / run_name
+        best_weight = run_dir / "weights" / "best.pt"
+        results_csv = run_dir / "results.csv"
         metrics = (
             self._read_best_metrics_from_csv(results_csv)
             or self._extract_metrics(results)
@@ -129,12 +154,13 @@ class YOLOv8Trainer(BaseTrainer):
         if not rows:
             return None
 
-        score_key = "metrics/mAP50-95(B)"
-        if score_key not in rows[0]:
-            score_key = "metrics/mAP50(B)"
-
+        score_keys = YOLOv8Trainer._resolve_metric_keys(list(rows[0].keys()))
         best_row: dict[str, str] | None = None
         best_score: float | None = None
+
+        score_key = score_keys["map50_95"] or score_keys["map50"]
+        if not score_key:
+            return None
 
         for row in rows:
             try:
@@ -150,10 +176,31 @@ class YOLOv8Trainer(BaseTrainer):
 
         return {
             "best_epoch": YOLOv8Trainer._to_int(best_row.get("epoch")),
-            "map50": YOLOv8Trainer._to_float(best_row.get("metrics/mAP50(B)")),
-            "map50_95": YOLOv8Trainer._to_float(best_row.get("metrics/mAP50-95(B)")),
-            "precision": YOLOv8Trainer._to_float(best_row.get("metrics/precision(B)")),
-            "recall": YOLOv8Trainer._to_float(best_row.get("metrics/recall(B)")),
+            "map50": YOLOv8Trainer._to_float(best_row.get(score_keys["map50"])),
+            "map50_95": YOLOv8Trainer._to_float(best_row.get(score_keys["map50_95"])),
+            "precision": YOLOv8Trainer._to_float(best_row.get(score_keys["precision"])),
+            "recall": YOLOv8Trainer._to_float(best_row.get(score_keys["recall"])),
+        }
+
+    @staticmethod
+    def _resolve_metric_keys(columns: list[str]) -> dict[str, str | None]:
+        """按列名模糊匹配训练/评估指标列，兼容检测/分割/姿态/OBB/分类的列名后缀。
+
+        ultralytics 的列后缀随任务类型变化：检测/OBB 为 (B)，分割为 (M)，姿态为 (P)。
+        分类任务没有 mAP 列，用 accuracy_top1/top5 映射到 map50/map50_95。
+        """
+
+        normalized = {col.strip().lower(): col for col in columns}
+
+        def find(prefix: str) -> str | None:
+            matches = [orig for key, orig in normalized.items() if key.startswith(prefix)]
+            return matches[0] if matches else None
+
+        return {
+            "map50": find("metrics/map50(") or find("metrics/accuracy_top1"),
+            "map50_95": find("metrics/map50-95(") or find("metrics/accuracy_top5"),
+            "precision": find("metrics/precision("),
+            "recall": find("metrics/recall("),
         }
 
     @staticmethod
@@ -204,12 +251,14 @@ class YOLOv8Trainer(BaseTrainer):
 
     def _extract_metrics(self, results: Any) -> dict[str, Any]:
         try:
+            results_dict = results.results_dict
+            keys = self._resolve_metric_keys(list(results_dict.keys()))
             return {
                 "best_epoch": 0,
-                "map50": float(results.results_dict.get("metrics/mAP50(B)", 0)),
-                "map50_95": float(results.results_dict.get("metrics/mAP50-95(B)", 0)),
-                "precision": float(results.results_dict.get("metrics/precision(B)", 0)),
-                "recall": float(results.results_dict.get("metrics/recall(B)", 0)),
+                "map50": float(results_dict.get(keys["map50"], 0)),
+                "map50_95": float(results_dict.get(keys["map50_95"], 0)),
+                "precision": float(results_dict.get(keys["precision"], 0)),
+                "recall": float(results_dict.get(keys["recall"], 0)),
             }
         except (AttributeError, TypeError):
             return {

@@ -90,6 +90,13 @@ async def delete_model(
         raise NotFoundError("Model not found")
 
 
+@router.get("/{model_id}/lineage", response_model=list[MLModelResponse], summary="查询模型版本谱系")
+async def get_model_lineage(
+    model_id: uuid.UUID, service: MLModelService = Depends(get_service)
+):
+    return await service.get_lineage(model_id)
+
+
 @router.get("/{model_id}/download", summary="下载模型权重文件")
 async def download_model(
     model_id: uuid.UUID, service: MLModelService = Depends(get_service)

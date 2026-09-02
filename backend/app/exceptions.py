@@ -21,6 +21,11 @@ class ConflictError(AppException):
         super().__init__(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
 
+class ForbiddenError(AppException):
+    def __init__(self, detail: str = "Permission denied") -> None:
+        super().__init__(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
 class InferenceError(AppException):
     def __init__(self, detail: str = "Inference failed") -> None:
         super().__init__(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail)

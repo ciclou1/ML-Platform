@@ -29,6 +29,25 @@
                 />
               </el-select>
             </el-form-item>
+            <el-form-item label="F-beta beta">
+              <el-input-number v-model="fbetaBeta" :min="0.1" :step="0.1" :precision="1" />
+            </el-form-item>
+            <el-form-item label="自定义指标">
+              <el-select
+                v-model="selectedMetricPackageVersion"
+                clearable
+                filterable
+                placeholder="使用算法包指标（可选）"
+                style="width: 100%"
+              >
+                <el-option
+                  v-for="option in metricPackageOptions"
+                  :key="option.id"
+                  :label="option.label"
+                  :value="option.id"
+                />
+              </el-select>
+            </el-form-item>
             <el-form-item>
               <el-button type="primary" :loading="loading" @click="startEval">
                 开始评估
@@ -67,8 +86,10 @@ import { ElMessage } from 'element-plus'
 import { getDatasets } from '@/api/dataset'
 import { runEvaluation } from '@/api/evaluation'
 import { getModels } from '@/api/model'
+import { getAlgorithmPackageVersions, getAlgorithmPackages } from '@/api/algorithmPackage'
 import { getTask, getTaskArtifacts, getTasks, syncTask } from '@/api/task'
 import type { Dataset } from '@/types/dataset'
+import type { AlgorithmPackageVersion } from '@/types/algorithmPackage'
 import { normalizeEvaluationReport } from '@/types/evaluation'
 import type { EvaluationReport } from '@/types/evaluation'
 import type { MLModel } from '@/types/model'
@@ -80,6 +101,9 @@ const models = ref<MLModel[]>([])
 const datasets = ref<Dataset[]>([])
 const selectedModel = ref('')
 const selectedDataset = ref('')
+const selectedMetricPackageVersion = ref('')
+const fbetaBeta = ref(1)
+const metricPackageOptions = ref<Array<{ id: string; label: string }>>([])
 const loading = ref(false)
 const activeTask = ref<Task | null>(null)
 const report = ref<EvaluationReport | null>(null)
@@ -90,6 +114,7 @@ onMounted(async () => {
   const [modelList, datasetList] = await Promise.all([getModels(), getDatasets()])
   models.value = modelList
   datasets.value = datasetList
+  await loadMetricPackageOptions()
   await resumeLatestEvaluation()
 })
 
@@ -112,6 +137,8 @@ async function startEval() {
     const task = await runEvaluation({
       model_id: selectedModel.value,
       dataset_id: selectedDataset.value,
+      fbeta_beta: fbetaBeta.value,
+      algorithm_package_version_id: selectedMetricPackageVersion.value || undefined,
     })
     activeTask.value = task
     pollForResult(task.id)
@@ -120,6 +147,31 @@ async function startEval() {
     const message = err instanceof Error ? err.message : '评估启动失败'
     ElMessage.error(message)
   }
+}
+
+async function loadMetricPackageOptions() {
+  try {
+    const packages = await getAlgorithmPackages()
+    const versionsByPackage = await Promise.all(
+      packages.map(async (pkg) => ({
+        pkg,
+        versions: await getAlgorithmPackageVersions(pkg.id),
+      })),
+    )
+    metricPackageOptions.value = versionsByPackage.flatMap(({ pkg, versions }) =>
+      versions
+        .filter(hasMetricEntrypoint)
+        .map((version) => ({ id: version.id, label: `${pkg.name} ${version.version}` })),
+    )
+  } catch {
+    metricPackageOptions.value = []
+  }
+}
+
+function hasMetricEntrypoint(version: AlgorithmPackageVersion): boolean {
+  return version.status === 'published'
+    && typeof version.runtime_config?.metrics_entrypoint === 'string'
+    && version.runtime_config.metrics_entrypoint.length > 0
 }
 
 async function resumeLatestEvaluation() {

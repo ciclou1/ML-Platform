@@ -33,6 +33,8 @@ class MLModelResponse(BaseModel):
     status: str
     model_source: str
     dataset_id: uuid.UUID | None
+    parent_model_id: uuid.UUID | None
+    model_task: str
     metrics: dict[str, Any] | None
     created_at: datetime
     updated_at: datetime

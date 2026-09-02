@@ -29,13 +29,16 @@
       </el-table-column>
       <el-table-column prop="model_size_mb" label="大小(MB)" width="100" />
       <el-table-column prop="status" label="状态" width="100" />
-      <el-table-column label="操作" width="240">
+      <el-table-column label="操作" width="300">
         <template #default="{ row }">
           <el-button size="small" type="primary" link @click="handleDownload(row.id)">
             下载
           </el-button>
           <el-button size="small" type="primary" link @click="handleViewDetail(row)">
             详情
+          </el-button>
+          <el-button size="small" type="primary" link @click="handleViewLineage(row)">
+            谱系
           </el-button>
           <el-button size="small" type="danger" link @click="handleDelete(row.id)">
             删除
@@ -56,6 +59,36 @@
         </el-descriptions-item>
       </el-descriptions>
     </el-dialog>
+    <el-drawer v-model="lineageVisible" title="模型版本谱系" size="640px">
+      <el-alert
+        v-if="lineageModels.length > 0"
+        type="info"
+        :closable="false"
+        title="按训练先后排序：根模型（预训练/导入）在首位，每次训练产出为其子版本"
+        style="margin-bottom: 12px"
+      />
+      <el-table :data="lineageModels" border>
+        <el-table-column prop="name" label="名称" min-width="160" />
+        <el-table-column prop="version" label="版本" width="90" />
+        <el-table-column label="来源" width="90">
+          <template #default="{ row }">
+            <el-tag :type="sourceTag(row.model_source)" size="small">
+              {{ sourceLabel(row.model_source) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="mAP50" width="90">
+          <template #default="{ row }">
+            {{ formatMetric(row.metrics?.map50) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="训练时间" width="110">
+          <template #default="{ row }">
+            {{ (row.created_at || '').slice(0, 10) }}
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-drawer>
     <el-dialog v-model="importVisible" title="导入模型" width="500px" @closed="resetImportForm">
       <el-form :model="importForm" label-width="90px">
         <el-form-item label="名称" required>
@@ -98,7 +131,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
-import { getModels, deleteModel, modelDownloadUrl, importModel } from '@/api/model'
+import { getModels, deleteModel, modelDownloadUrl, importModel, getModelLineage } from '@/api/model'
 import type { MLModel } from '@/types/model'
 import type { UploadFile } from 'element-plus'
 
@@ -106,6 +139,8 @@ const models = ref<MLModel[]>([])
 const filterSource = ref('')
 const detailVisible = ref(false)
 const selectedModel = ref<MLModel | null>(null)
+const lineageVisible = ref(false)
+const lineageModels = ref<MLModel[]>([])
 
 onMounted(loadModels)
 
@@ -144,6 +179,15 @@ function handleDownload(id: string) {
 function handleViewDetail(model: MLModel) {
   selectedModel.value = model
   detailVisible.value = true
+}
+
+async function handleViewLineage(model: MLModel) {
+  try {
+    lineageModels.value = (await getModelLineage(model.id)) || []
+  } catch {
+    lineageModels.value = []
+  }
+  lineageVisible.value = true
 }
 
 async function handleDelete(id: string) {

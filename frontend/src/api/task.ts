@@ -30,6 +30,10 @@ export function startTask(id: string) {
   return request.post<never, Task>(`/tasks/${id}/start`)
 }
 
+export function resumeTask(id: string) {
+  return request.post<never, Task>(`/tasks/${id}/resume`)
+}
+
 export function syncTask(id: string) {
   return request.post<never, Task>(`/tasks/${id}/sync`)
 }

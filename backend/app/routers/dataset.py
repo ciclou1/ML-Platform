@@ -82,6 +82,16 @@ async def list_dataset_images(
     )
 
 
+@router.get("/images/{image_id}", response_model=ImageResponse, summary="查询单张图片")
+async def get_dataset_image(
+    image_id: uuid.UUID, service: DatasetService = Depends(get_service)
+):
+    image = await service.get_image(image_id)
+    if not image:
+        raise NotFoundError("Image not found")
+    return image
+
+
 @router.delete("/images/{image_id}", status_code=204, summary="删除数据集图片")
 async def delete_dataset_image(
     image_id: uuid.UUID, service: DatasetService = Depends(get_service)

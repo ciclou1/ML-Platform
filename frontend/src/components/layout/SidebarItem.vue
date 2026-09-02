@@ -28,9 +28,6 @@ import {
   Edit,
   Cpu,
   Setting,
-  VideoPlay,
-  MagicStick,
-  DataAnalysis,
 } from '@element-plus/icons-vue'
 import type { MenuItem } from '@/config/menu'
 
@@ -42,8 +39,5 @@ const iconMap: Record<string, unknown> = {
   Edit: markRaw(Edit),
   Cpu: markRaw(Cpu),
   Setting: markRaw(Setting),
-  VideoPlay: markRaw(VideoPlay),
-  MagicStick: markRaw(MagicStick),
-  DataAnalysis: markRaw(DataAnalysis),
 }
 </script>

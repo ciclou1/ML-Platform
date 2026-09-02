@@ -1,23 +1,25 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.annotation_shapes import validate_annotation_data
 from app.core.dataset_files import (
     build_yolo_label_file_index,
     extract_class_names,
-    read_yaml_payload,
     read_image_size,
+    read_yaml_payload,
     resolve_dataset_root_from_image_path,
     resolve_storage_path,
     resolve_yolo_label_path,
 )
-from app.models.dataset import Image, Label
 from app.models.annotation import Annotation
+from app.models.dataset import Image, Label
+from app.repositories.annotation import AnnotationRepository
+from app.repositories.annotation_batch import AnnotationBatchItemRepository
 from app.repositories.dataset import ImageRepository
 from app.repositories.label import LabelRepository
-from app.repositories.annotation import AnnotationRepository
 from app.schemas.annotation import AnnotationCreate, AnnotationUpdate
 
 
@@ -26,6 +28,7 @@ class AnnotationService:
         self.repo = AnnotationRepository(session)
         self.image_repo = ImageRepository(session)
         self.label_repo = LabelRepository(session)
+        self.batch_item_repo = AnnotationBatchItemRepository(session)
         self.session = session
 
     async def list_by_image(self, image_id: uuid.UUID) -> list[Annotation]:
@@ -41,13 +44,17 @@ class AnnotationService:
         return self._load_from_yolo_label(image, labels)
 
     async def create_annotation(self, data: AnnotationCreate) -> Annotation:
+        validate_annotation_data(data.annotation_type, data.data)
         entity = Annotation(
             image_id=data.image_id,
             label_id=data.label_id,
             annotation_type=data.annotation_type,
             data=data.data,
         )
-        return await self.repo.create(entity)
+        result = await self.repo.create(entity)
+        await self._mark_batch_item_annotating(data.image_id)
+        await self._mark_image_status(data.image_id, "annotated")
+        return result
 
     async def update_annotation(
         self, annotation_id: uuid.UUID, data: AnnotationUpdate
@@ -56,9 +63,14 @@ class AnnotationService:
         if not entity:
             return None
         update_data = data.model_dump(exclude_unset=True)
+        if update_data.get("data") is not None:
+            validate_annotation_data(entity.annotation_type, update_data["data"])
         for field, value in update_data.items():
             setattr(entity, field, value)
-        return await self.repo.update(entity)
+        result = await self.repo.update(entity)
+        await self._mark_batch_item_annotating(entity.image_id)
+        await self._mark_image_status(entity.image_id, "annotated")
+        return result
 
     async def delete_annotation(self, annotation_id: uuid.UUID) -> bool:
         entity = await self.repo.get_by_id(annotation_id)
@@ -74,6 +86,12 @@ class AnnotationService:
             results.append(entity)
         return results
 
+    async def _mark_batch_item_annotating(self, image_id: uuid.UUID) -> None:
+        item = await self.batch_item_repo.get_active_for_image(image_id)
+        if item and item.status in {"pending", "rejected"}:
+            item.status = "annotating"
+            await self.batch_item_repo.update(item)
+
     async def replace_for_image(
         self, image_id: uuid.UUID, items: list[AnnotationCreate]
     ) -> list[Annotation]:
@@ -83,7 +101,15 @@ class AnnotationService:
         for item in items:
             entity = await self.create_annotation(item)
             results.append(entity)
+        await self._mark_batch_item_annotating(image_id)
+        await self._mark_image_status(image_id, "annotated" if results else "unannotated")
         return results
+
+    async def _mark_image_status(self, image_id: uuid.UUID, status: str) -> None:
+        image = await self.image_repo.get_by_id(image_id)
+        if image and image.annotation_status != status:
+            image.annotation_status = status
+            await self.image_repo.update(image)
 
     def _load_from_yolo_label(self, image: Image, labels: list[Label]) -> list[Annotation]:
         label_path = self._resolve_label_path(image)
@@ -132,12 +158,12 @@ class AnnotationService:
                         "width": round(abs_width, 2),
                         "height": round(abs_height, 2),
                     },
-                    created_at=datetime.now(timezone.utc),
-                    updated_at=datetime.now(timezone.utc),
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
                 )
             )
-            setattr(annotations[-1], "label_name", label.name)
-            setattr(annotations[-1], "color", label.color)
+            annotations[-1].label_name = label.name
+            annotations[-1].color = label.color
 
         return annotations
 

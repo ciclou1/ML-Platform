@@ -13,6 +13,9 @@
       <el-table-column label="F1" width="100">
         <template #default="{ row }">{{ formatPercent(row.f1) }}</template>
       </el-table-column>
+      <el-table-column label="F-beta" width="100">
+        <template #default="{ row }">{{ formatPercent(row.fbeta) }}</template>
+      </el-table-column>
       <el-table-column label="mAP50" width="110">
         <template #default="{ row }">{{ formatPercent(row.map50) }}</template>
       </el-table-column>

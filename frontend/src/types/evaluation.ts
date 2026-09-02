@@ -1,6 +1,10 @@
 export interface EvaluationRequest {
   model_id: string
   dataset_id: string
+  iou_threshold?: number
+  algorithm_package_version_id?: string
+  fbeta_beta?: number
+  class_weights?: Record<string, number>
 }
 
 export interface EvaluationSpeed {
@@ -28,8 +32,21 @@ export interface PerClassMetric {
   precision: number
   recall: number
   f1: number
+  fbeta?: number
   map50: number
   map50_95: number
+}
+
+export interface WeightedEvaluationMetrics {
+  weighted_precision: number
+  weighted_recall: number
+  weighted_fbeta: number
+  weighted_map50: number
+}
+
+export interface EvaluationCustomConfig {
+  beta: number
+  weights: Record<string, number>
 }
 
 export interface EvaluationReport {
@@ -39,7 +56,12 @@ export interface EvaluationReport {
   precision: number
   recall: number
   f1?: number
+  fbeta?: number
   fitness?: number
+  weighted?: WeightedEvaluationMetrics
+  custom_config?: EvaluationCustomConfig
+  custom_metrics?: Record<string, unknown>
+  custom_metrics_error?: string
   speed_ms?: EvaluationSpeed
   dataset_summary?: EvaluationDatasetSummary
   evaluation_config?: EvaluationConfig
@@ -106,10 +128,49 @@ function normalizePerClass(value: unknown): PerClassMetric[] {
       precision: toNumber(row.precision),
       recall: toNumber(row.recall),
       f1: toNumber(row.f1),
+      fbeta: typeof row.fbeta === 'number' ? row.fbeta : undefined,
       map50: toNumber(row.map50),
       map50_95: toNumber(row.map50_95),
     }
   })
+}
+
+function normalizeWeighted(value: unknown): WeightedEvaluationMetrics | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+  const metrics = value as Record<string, unknown>
+  return {
+    weighted_precision: toNumber(metrics.weighted_precision),
+    weighted_recall: toNumber(metrics.weighted_recall),
+    weighted_fbeta: toNumber(metrics.weighted_fbeta),
+    weighted_map50: toNumber(metrics.weighted_map50),
+  }
+}
+
+function normalizeCustomConfig(value: unknown): EvaluationCustomConfig | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+  const config = value as Record<string, unknown>
+  const weights = config.weights
+  const normalizedWeights: Record<string, number> = {}
+  if (weights && typeof weights === 'object') {
+    for (const [key, item] of Object.entries(weights as Record<string, unknown>)) {
+      normalizedWeights[key] = toNumber(item)
+    }
+  }
+  return {
+    beta: toNumber(config.beta),
+    weights: normalizedWeights,
+  }
+}
+
+function normalizeCustomMetrics(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined
+  }
+  return value as Record<string, unknown>
 }
 
 export function normalizeEvaluationReport(result: Record<string, unknown>): EvaluationReport {
@@ -122,7 +183,13 @@ export function normalizeEvaluationReport(result: Record<string, unknown>): Eval
     precision,
     recall,
     f1: toNumber(result.f1 ?? computeF1(precision, recall)),
+    fbeta: typeof result.fbeta === 'number' ? result.fbeta : undefined,
     fitness: toNumber(result.fitness),
+    weighted: normalizeWeighted(result.weighted),
+    custom_config: normalizeCustomConfig(result.custom_config),
+    custom_metrics: normalizeCustomMetrics(result.custom_metrics),
+    custom_metrics_error:
+      typeof result.custom_metrics_error === 'string' ? result.custom_metrics_error : undefined,
     speed_ms: normalizeSpeed(result.speed_ms),
     dataset_summary: normalizeDatasetSummary(result.dataset_summary),
     evaluation_config: normalizeConfig(result.evaluation_config),

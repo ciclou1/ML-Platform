@@ -3,6 +3,13 @@
     <EvaluationSummaryCards :cards="headlineCards" />
     <EvaluationReportDetails :report="report" />
     <EvaluationPerClassTable :rows="perClassRows" />
+    <EvaluationCustomMetrics
+      v-if="report.weighted || report.custom_metrics || report.custom_metrics_error"
+      :weighted="report.weighted"
+      :custom-config="report.custom_config"
+      :custom-metrics="report.custom_metrics"
+      :custom-metrics-error="report.custom_metrics_error"
+    />
     <TaskArtifactPanel
       v-if="artifacts.length"
       :title="artifactTitle"
@@ -27,6 +34,7 @@ import { formatPercent } from '@/types/evaluation'
 import type { EvaluationReport } from '@/types/evaluation'
 import type { TaskArtifactItem } from '@/types/task'
 import EvaluationPerClassTable from './EvaluationPerClassTable.vue'
+import EvaluationCustomMetrics from './EvaluationCustomMetrics.vue'
 import EvaluationReportDetails from './EvaluationReportDetails.vue'
 import EvaluationSummaryCards from './EvaluationSummaryCards.vue'
 import TaskArtifactPanel from './TaskArtifactPanel.vue'
@@ -56,6 +64,9 @@ const headlineCards = computed(() => {
     { label: 'Precision', value: formatPercent(props.report.precision) },
     { label: 'Recall', value: formatPercent(props.report.recall) },
     { label: 'F1', value: formatPercent(props.report.f1) },
+    ...(props.report.fbeta !== undefined
+      ? [{ label: 'F-beta', value: formatPercent(props.report.fbeta) }]
+      : []),
   ]
 })
 

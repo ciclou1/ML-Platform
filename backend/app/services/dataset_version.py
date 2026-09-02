@@ -15,6 +15,7 @@ import yaml
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.annotation_shapes import annotation_to_yolo_line, assert_exportable
 from app.core.dataset_files import (
     build_yolo_label_file_index,
     extract_class_names,
@@ -166,6 +167,10 @@ class DatasetVersionService:
         version = await self.version_repo.get_by_id(data.dataset_version_id)
         if not version:
             raise NotFoundError("Dataset version not found")
+
+        dataset = await self.dataset_repo.get_by_id(version.dataset_id)
+        if dataset:
+            assert_exportable([str(item) for item in (dataset.annotation_types or [])])
 
         validation = await self.validate_version(version.id)
         entity = DatasetExport(
@@ -571,6 +576,10 @@ class DatasetVersionService:
         if not dataset:
             raise NotFoundError("Dataset not found")
 
+        if set(dataset.annotation_types or []) == {"classify"}:
+            await self._materialize_classification_export(export_entity, version, data, dataset)
+            return
+
         snapshot = await self._build_snapshot(
             dataset,
             include_splits=data.splits,
@@ -685,6 +694,11 @@ class DatasetVersionService:
             "names": class_names,
             "nc": len(class_names),
         }
+        kpt_shape = self._resolve_export_kpt_shape(
+            labels, snapshot.get("annotations_by_image") or {}
+        )
+        if kpt_shape:
+            yaml_payload["kpt_shape"] = kpt_shape
         data_yaml_path.write_text(yaml.safe_dump(yaml_payload, sort_keys=False), encoding="utf-8")
 
         manifest_path = export_root / "manifest.json"
@@ -719,6 +733,55 @@ class DatasetVersionService:
         export_entity.output_path = str(export_root)
         export_entity.data_yaml_path = str(data_yaml_path)
         export_entity.manifest_path = str(manifest_path)
+
+    async def _materialize_classification_export(
+        self,
+        export_entity: DatasetExport,
+        version: DatasetVersion,
+        data: DatasetExportCreate,
+        dataset: Dataset,
+    ) -> None:
+        export_root = StoragePaths.export_root(export_entity.id)
+        if export_root.exists():
+            await asyncio.to_thread(shutil.rmtree, export_root, True)
+        labels = version.label_schema_snapshot or []
+        label_names = {str(item["id"]): str(item["name"]) for item in labels}
+        images = await self.image_repo.list_by_dataset(dataset.id, offset=0, limit=100000)
+        annotations = await self.annotation_repo.list_by_dataset(dataset.id)
+        by_image: dict[uuid.UUID, list[Annotation]] = defaultdict(list)
+        for annotation in annotations:
+            if annotation.annotation_type == "classify":
+                by_image[annotation.image_id].append(annotation)
+        split_counts: Counter[str] = Counter()
+        for image in images:
+            split = self._resolve_effective_split_for_image(image)
+            matches = by_image.get(image.id, [])
+            if split not in data.splits or len(matches) != 1:
+                continue
+            class_name = label_names.get(str(matches[0].label_id))
+            source_path = resolve_storage_path(image.file_path)
+            if not class_name or not source_path.exists():
+                continue
+            destination = export_root / split / class_name / source_path.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(shutil.copy2, source_path, destination)
+            split_counts[split] += 1
+        if not split_counts.get("train") or not split_counts.get("val"):
+            raise ValidationError("Classification export requires annotated train and val images")
+        data_yaml_path = export_root / "dataset.yaml"
+        data_yaml_path.write_text(
+            yaml.safe_dump({"path": str(export_root), "names": list(label_names.values())}),
+            encoding="utf-8",
+        )
+        manifest_path = export_root / "manifest.json"
+        manifest_path.write_text(
+            json.dumps({"task": "classify", "splits": dict(split_counts)}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        export_entity.output_path = str(export_root)
+        export_entity.data_yaml_path = str(data_yaml_path)
+        export_entity.manifest_path = str(manifest_path)
+        export_entity.split_config = {**(export_entity.split_config or {}), "splits": dict(split_counts)}
 
     async def _delete_export_entity(self, export: DatasetExport) -> None:
         await self._detach_tasks_for_export(export.id)
@@ -1005,15 +1068,32 @@ class DatasetVersionService:
         return image.split
 
     @staticmethod
+    def _resolve_export_kpt_shape(
+        labels: list[dict[str, Any]],
+        annotations_by_image: dict[uuid.UUID, list[Annotation]],
+    ) -> list[int] | None:
+        """pose 导出的 data.yaml kpt_shape: [点数, 3]，优先取标签快照里的骨架定义。"""
+
+        for label in labels:
+            skeleton = (label.get("skeleton") or {}) if isinstance(label, dict) else {}
+            num_points = skeleton.get("num_points")
+            if isinstance(num_points, int) and num_points > 0:
+                return [num_points, 3]
+        for annotations in annotations_by_image.values():
+            for annotation in annotations:
+                if annotation.annotation_type != "keypoint":
+                    continue
+                points = (annotation.data or {}).get("points")
+                if isinstance(points, list) and points:
+                    return [len(points), 3]
+        return None
+
+    @staticmethod
     def _to_yolo_line(
         annotation: Annotation, image: Image, label_index: dict[str, int]
     ) -> str | None:
         payload = annotation.data or {}
-        x = payload.get("x")
-        y = payload.get("y")
-        width = payload.get("width")
-        height = payload.get("height")
-        if None in (x, y, width, height):
+        if not isinstance(payload, dict):
             return None
         if image.width <= 0 or image.height <= 0:
             return None
@@ -1022,15 +1102,11 @@ class DatasetVersionService:
         if class_id is None:
             return None
 
-        x_center = (float(x) + float(width) / 2) / float(image.width)
-        y_center = (float(y) + float(height) / 2) / float(image.height)
-        norm_width = float(width) / float(image.width)
-        norm_height = float(height) / float(image.height)
-        if min(x_center, y_center, norm_width, norm_height) < 0:
-            return None
-
-        return (
-            f"{class_id} "
-            f"{x_center:.6f} {y_center:.6f} {norm_width:.6f} {norm_height:.6f}"
+        return annotation_to_yolo_line(
+            annotation.annotation_type,
+            payload,
+            class_id,
+            image.width,
+            image.height,
         )
 

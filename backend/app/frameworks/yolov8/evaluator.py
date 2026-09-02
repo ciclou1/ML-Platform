@@ -2,6 +2,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from app.core.metric_entrypoint import run_metric_entrypoint
+from app.core.metrics import add_custom_metrics
 from app.core.storage.paths import StoragePaths
 from app.frameworks.base import BaseEvaluator
 
@@ -10,20 +12,23 @@ logger = logging.getLogger(__name__)
 
 class YOLOv8Evaluator(BaseEvaluator):
     async def evaluate(self, config: dict[str, Any]) -> dict[str, Any]:
-        from ultralytics import YOLO
-
         import torch
+        from ultralytics import YOLO
         model_path = config["model_path"]
         device = config.get("device") or ("cuda" if torch.cuda.is_available() else "cpu")
         split = str(config.get("split", "val"))
         task_id = config.get("task_id", "standalone")
 
         model = YOLO(model_path)
-        results = model.val(
-            **self._build_val_kwargs(config, device=device, split=split, task_id=task_id)
+        val_kwargs = self._build_val_kwargs(
+            config, device=device, split=split, task_id=task_id
         )
+        if getattr(model, "task", None) == "classify":
+            val_kwargs["data"] = self._resolve_cls_data_dir(str(val_kwargs["data"]))
+        results = model.val(**val_kwargs)
 
         metrics = self._extract_metrics(results, split=split)
+        metrics = self._add_custom_metrics(metrics, results, config)
 
         logger.info("Evaluation completed: %s", metrics)
         return metrics
@@ -42,11 +47,61 @@ class YOLOv8Evaluator(BaseEvaluator):
             "device": device,
             "imgsz": config.get("img_size", 640),
             "plots": True,
-            "save_json": False,
+            "save_json": True,
             "exist_ok": True,
         }
         self._set_optional_val_kwargs(val_kwargs, config, task_id=task_id)
         return val_kwargs
+
+    @staticmethod
+    def _resolve_cls_data_dir(data: str) -> str:
+        """ultralytics 分类任务要求数据参数为数据集根目录，而非 data.yaml 文件。"""
+
+        path = Path(data)
+        return str(path.parent) if path.is_file() else data
+
+    def _add_custom_metrics(
+        self,
+        metrics: dict[str, Any],
+        results: Any,
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        metric_options = config.get("metric_options")
+        options = metric_options if isinstance(metric_options, dict) else {}
+        beta = self._safe_float(options.get("beta", 1.0))
+        beta = beta if beta > 0 else 1.0
+        weights = options.get("class_weights")
+        class_weights = weights if isinstance(weights, dict) else None
+        enriched = add_custom_metrics(
+            metrics,
+            per_class=metrics.get("per_class") or [],
+            beta=beta,
+            weights=class_weights,
+        )
+        predictions = self._extract_predictions(results)
+        enriched["predictions"] = predictions
+
+        entry_config = config.get("custom_metric_entrypoint")
+        if isinstance(entry_config, dict):
+            try:
+                enriched["custom_metrics"] = run_metric_entrypoint(
+                    entry_config,
+                    {
+                        "metrics": enriched,
+                        "predictions": predictions,
+                        "config": entry_config.get("config") or {},
+                    },
+                )
+            except Exception as exc:  # Algorithm package code is an extension boundary.
+                logger.warning("Custom metric entrypoint failed: %s", exc)
+                enriched["custom_metrics_error"] = str(exc)
+        return enriched
+
+    def _extract_predictions(self, results: Any) -> list[dict[str, Any]]:
+        raw_predictions = getattr(results, "jdict", None)
+        if not isinstance(raw_predictions, list):
+            return []
+        return [item for item in raw_predictions if isinstance(item, dict)]
 
     def _set_optional_val_kwargs(
         self,
@@ -70,11 +125,12 @@ class YOLOv8Evaluator(BaseEvaluator):
 
     def _extract_metrics(self, results: Any, *, split: str) -> dict[str, Any]:
         results_dict = getattr(results, "results_dict", {}) or {}
-        precision = self._safe_float(results_dict.get("metrics/precision(B)", 0))
-        recall = self._safe_float(results_dict.get("metrics/recall(B)", 0))
-        map50 = self._safe_float(results_dict.get("metrics/mAP50(B)", 0))
+        keys = YOLOv8Evaluator._resolve_metric_keys(list(results_dict.keys()))
+        precision = self._safe_float(results_dict.get(keys["precision"], 0))
+        recall = self._safe_float(results_dict.get(keys["recall"], 0))
+        map50 = self._safe_float(results_dict.get(keys["map50"], 0))
+        map50_95 = self._safe_float(results_dict.get(keys["map50_95"], 0))
         map75 = self._safe_float(results_dict.get("metrics/mAP75(B)", 0))
-        map50_95 = self._safe_float(results_dict.get("metrics/mAP50-95(B)", 0))
 
         box_metrics = getattr(results, "box", None)
         speed = getattr(results, "speed", None)
@@ -239,3 +295,20 @@ class YOLOv8Evaluator(BaseEvaluator):
             return list(value)
         except TypeError:
             return [value]
+
+    @staticmethod
+    def _resolve_metric_keys(columns: list[str]) -> dict[str, str | None]:
+        """按列名前缀模糊匹配指标列，兼容检测/分割/姿态/OBB/分类的列名后缀。"""
+
+        normalized = {col.strip().lower(): col for col in columns}
+
+        def find(prefix: str) -> str | None:
+            matches = [orig for key, orig in normalized.items() if key.startswith(prefix)]
+            return matches[0] if matches else None
+
+        return {
+            "map50": find("metrics/map50(") or find("metrics/accuracy_top1"),
+            "map50_95": find("metrics/map50-95(") or find("metrics/accuracy_top5"),
+            "precision": find("metrics/precision("),
+            "recall": find("metrics/recall("),
+        }

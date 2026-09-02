@@ -1,4 +1,5 @@
 import request from './request'
+import { appendAccessToken } from './accessToken'
 import type { MLModel } from '@/types/model'
 
 export function getModels(params?: {
@@ -49,5 +50,9 @@ export function importModel(payload: {
 }
 
 export function modelDownloadUrl(id: string): string {
-  return `/api/v1/models/${id}/download`
+  return appendAccessToken(`/api/v1/models/${id}/download`)
+}
+
+export function getModelLineage(id: string) {
+  return request.get<never, MLModel[]>(`/models/${id}/lineage`)
 }

@@ -41,6 +41,7 @@
           v-model="form.dataset_export_id"
           placeholder="选择已成功导出的训练输入"
           style="width: 100%"
+          @change="handleExportChange"
         >
           <el-option
             v-for="record in filteredExports"
@@ -120,6 +121,19 @@
               </div>
             </div>
           </el-form-item>
+          <el-form-item label="冻结层数">
+            <div class="field-with-hint">
+              <el-input-number
+                v-model="form.freeze"
+                :min="0"
+                :max="25"
+                placeholder="不冻结"
+              />
+              <div class="field-hint">
+                微调常用：冻结主干前 N 层只训练头部；0 表示不冻结。
+              </div>
+            </div>
+          </el-form-item>
           <el-form-item label="余弦学习率">
             <el-switch v-model="form.cos_lr" />
           </el-form-item>
@@ -143,7 +157,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getDatasets } from '@/api/dataset'
 import { getDatasetExports, getDatasetVersions } from '@/api/datasetVersion'
@@ -173,6 +187,7 @@ interface TrainingTaskFormState {
   warmup_epochs: number
   cos_lr: boolean
   close_mosaic: number
+  freeze: number
   pretrained: boolean
 }
 
@@ -201,6 +216,7 @@ const form = reactive<TrainingTaskFormState>({
   warmup_epochs: 3,
   cos_lr: false,
   close_mosaic: 10,
+  freeze: 0,
   pretrained: true,
 })
 
@@ -211,28 +227,7 @@ const filteredVersions = computed(() =>
 )
 
 const filteredExports = computed(() =>
-  datasetExports.value.filter(
-    (item) =>
-      item.status === 'success' &&
-      (!form.dataset_id || item.dataset_id === form.dataset_id) &&
-      (!form.dataset_version_id ||
-        item.dataset_version_id === form.dataset_version_id),
-  ),
-)
-
-watch(
-  () => form.dataset_id,
-  () => {
-    form.dataset_version_id = ''
-    form.dataset_export_id = ''
-  },
-)
-
-watch(
-  () => form.dataset_version_id,
-  () => {
-    form.dataset_export_id = ''
-  },
+  datasetExports.value.filter((item) => item.status === 'success'),
 )
 
 onMounted(async () => {
@@ -277,7 +272,20 @@ async function loadDatasetExports() {
 }
 
 function formatExportOptionLabel(record: DatasetExportRecordDetail): string {
-  return `${record.export_name} (${String(record.export_format).toUpperCase()})`
+  return `${datasetName(record.dataset_id)} - ${record.export_name} (${String(record.export_format).toUpperCase()})`
+}
+
+function datasetName(datasetId: string): string {
+  return datasets.value.find((dataset) => dataset.id === datasetId)?.name || '未知数据集'
+}
+
+function handleExportChange(exportId: string) {
+  const record = datasetExports.value.find((item) => item.id === exportId)
+  if (!record) {
+    return
+  }
+  form.dataset_id = record.dataset_id
+  form.dataset_version_id = record.dataset_version_id
 }
 
 async function handleSubmit() {
@@ -306,6 +314,7 @@ async function handleSubmit() {
     warmup_epochs: form.warmup_epochs,
     cos_lr: form.cos_lr,
     close_mosaic: form.close_mosaic,
+    freeze: form.freeze > 0 ? form.freeze : undefined,
     pretrained: form.pretrained,
     framework: 'ultralytics',
   }

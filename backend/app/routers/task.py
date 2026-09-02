@@ -70,6 +70,13 @@ async def start_task(
     return entity
 
 
+@router.post("/{task_id}/resume", response_model=TaskResponse, summary="从失败/取消任务创建断点续训任务")
+async def resume_task(
+    task_id: uuid.UUID, service: TaskService = Depends(get_service)
+):
+    return await service.create_resume_task(task_id)
+
+
 @router.get("/{task_id}/progress", summary="查询任务进度")
 async def get_task_progress(
     task_id: uuid.UUID, service: TaskService = Depends(get_service)

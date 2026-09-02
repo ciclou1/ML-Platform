@@ -130,8 +130,11 @@ class DatasetImporter:
 
         if not classes:
             classes = self._scan_classes_from_labels(root)
+        if not classes:
+            classes = self._scan_classes_from_split_class_dirs(root)
 
         data: dict[str, Any] = {
+            "path": str(root),
             "names": dict(enumerate(classes)),
             "nc": len(classes),
         }
@@ -153,7 +156,13 @@ class DatasetImporter:
             if images_dir is not None:
                 data[split_name] = str(images_dir)
 
-        yaml_path.write_text(yaml.dump(data, allow_unicode=True))
+        # ultralytics 要求 yaml 同时含 train/val 键；缺失的划分回退到已有目录
+        if "train" not in data and "val" in data:
+            data["train"] = data["val"]
+        if "val" not in data and "train" in data:
+            data["val"] = data["train"]
+
+        yaml_path.write_text(yaml.dump(data, allow_unicode=True), encoding="utf-8")
         logger.info("Generated data.yaml at %s", yaml_path)
         return str(yaml_path)
 
@@ -207,6 +216,9 @@ class DatasetImporter:
         class_dirs = self._scan_classes_from_image_dirs(root)
         if class_dirs:
             return class_dirs
+        class_dirs = self._scan_classes_from_split_class_dirs(root)
+        if class_dirs:
+            return class_dirs
         return self._scan_classes_from_labels(root)
 
     def _scan_classes_from_image_dirs(self, root: Path) -> list[str]:
@@ -219,6 +231,27 @@ class DatasetImporter:
             if any(file_path.suffix.lower() in _IMAGE_EXTS for file_path in directory.iterdir() if file_path.is_file()):
                 class_dirs.append(directory.name)
         return sorted(class_dirs)
+
+    def _scan_classes_from_split_class_dirs(self, root: Path) -> list[str]:
+        """YOLO-cls 布局（train/<class>/images）：类别名取 split 目录下的子目录。"""
+
+        for split_name in ("train", "val", "valid", "test"):
+            split_dir = self._find_split_dir(root, split_name)
+            if split_dir is None:
+                continue
+            classes = sorted(
+                child.name
+                for child in split_dir.iterdir()
+                if child.is_dir()
+                and any(
+                    file_path.suffix.lower() in _IMAGE_EXTS
+                    for file_path in child.iterdir()
+                    if file_path.is_file()
+                )
+            )
+            if classes:
+                return classes
+        return []
 
     def _collect_images(self, root: Path) -> list[Path]:
         return [file_path for file_path in root.rglob("*") if file_path.suffix.lower() in _IMAGE_EXTS]
@@ -279,10 +312,15 @@ class DatasetImporter:
 
     @staticmethod
     def _find_split_dir(root: Path, split: str) -> Path | None:
-        direct_candidate = root / "images" / split
-        if direct_candidate.is_dir():
-            return direct_candidate
+        # 顶层候选兼容 YOLO-cls 布局（root/train/<class>/images）
+        for direct in (root / "images" / split, root / split):
+            if direct.is_dir():
+                return direct
 
+        return DatasetImporter._find_nested_split_dir(root, split)
+
+    @staticmethod
+    def _find_nested_split_dir(root: Path, split: str) -> Path | None:
         for images_dir in root.rglob("images"):
             if not images_dir.is_dir():
                 continue

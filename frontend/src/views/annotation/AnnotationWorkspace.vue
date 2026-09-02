@@ -81,6 +81,20 @@
           <el-button type="success" size="large" :disabled="labels.length === 0" @click="handleOpenExport">
             导出数据集
           </el-button>
+          <div v-if="reworkReview && selectedImageId === reworkReview.image_id" class="rework-submit">
+            <el-alert type="warning" :closable="false" show-icon>
+              <template #title>该图片曾被驳回，请完成修改后提交复审</template>
+              <template #default>{{ reworkReview.comment || '请检查并完善图片标注' }}</template>
+            </el-alert>
+            <el-button
+              type="warning"
+              :loading="resubmitting"
+              :disabled="!selectedImageId"
+              @click="submitRework"
+            >
+              提交复审
+            </el-button>
+          </div>
         </div>
       </div>
 
@@ -111,8 +125,12 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
+import { getAnnotationReview, resubmitAnnotationReview } from '@/api/annotationBatch'
+import { replaceImageAnnotations } from '@/api/annotation'
 import { createDatasetLabel, deleteLabel } from '@/api/label'
 import { useAnnotationWorkspace } from '@/composables/useAnnotationWorkspace'
+import type { Shape } from '@/composables/useCanvas'
+import type { AnnotationReview } from '@/types/annotation-batch'
 import type {
   ImageCanvasExpose,
   WorkspaceImageItem,
@@ -130,6 +148,8 @@ const datasetId = ref(typeof route.params.datasetId === 'string' ? route.params.
 const selectedDatasetId = ref('')
 const showExport = ref(false)
 const imageCanvasRef = ref<ImageCanvasExpose | null>(null)
+const reworkReview = ref<AnnotationReview | null>(null)
+const resubmitting = ref(false)
 
 const {
   datasetOptions,
@@ -153,6 +173,7 @@ const {
   loadData,
   loadMoreImages,
   restoreSelection,
+  focusImage,
   handleSelectImage,
   handleSelectLabel,
   handleTempSave,
@@ -193,6 +214,8 @@ onMounted(async () => {
   await loadDatasetOptions()
   if (datasetId.value) {
     await loadData()
+    await focusRouteImage()
+    await loadRouteReview()
   }
 })
 
@@ -202,9 +225,94 @@ watch(
     datasetId.value = typeof value === 'string' ? value : ''
     if (datasetId.value) {
       await loadData()
+      await focusRouteImage()
+      await loadRouteReview()
     }
   },
 )
+
+watch(
+  () => route.query.image,
+  async () => {
+    await focusRouteImage()
+  },
+)
+
+watch(
+  () => route.query.review,
+  async () => {
+    await loadRouteReview()
+  },
+)
+
+async function focusRouteImage() {
+  const imageId = typeof route.query.image === 'string' ? route.query.image : ''
+  if (!imageId || !datasetId.value) {
+    return
+  }
+  const focused = await focusImage(imageId)
+  if (!focused) {
+    ElMessage.warning('未找到需要返工的图片，可能已被删除或不属于当前数据集')
+  }
+}
+
+async function loadRouteReview() {
+  const reviewId = typeof route.query.review === 'string' ? route.query.review : ''
+  if (!reviewId) {
+    reworkReview.value = null
+    return
+  }
+  try {
+    const review = await getAnnotationReview(reviewId)
+    reworkReview.value = review.status === 'rejected' ? review : null
+  } catch {
+    reworkReview.value = null
+  }
+}
+
+function shapeToData(shape: Shape): Record<string, unknown> {
+  if (shape.type === 'classify') return {}
+  if (shape.type === 'bbox') {
+    return { x: shape.x, y: shape.y, width: shape.width, height: shape.height }
+  }
+  if (shape.type === 'polygon') return { points: shape.points }
+  if (shape.type === 'obb') {
+    return { cx: shape.cx, cy: shape.cy, w: shape.w, h: shape.h, angle: shape.angle }
+  }
+  return { bbox: shape.bbox, points: shape.points }
+}
+
+async function submitRework() {
+  if (
+    !reworkReview.value ||
+    !selectedImageId.value ||
+    selectedImageId.value !== reworkReview.value.image_id
+  ) {
+    return
+  }
+  const shapes = draftStore.value.get(selectedImageId.value) || []
+  resubmitting.value = true
+  try {
+    await replaceImageAnnotations(
+      selectedImageId.value,
+      shapes.map((shape) => ({
+        image_id: selectedImageId.value,
+        label_id: shape.labelId,
+        annotation_type: shape.type,
+        data: shapeToData(shape),
+      })),
+    )
+    const batchId = reworkReview.value.batch_id
+    await resubmitAnnotationReview(reworkReview.value.id)
+    reworkReview.value = null
+    ElMessage.success('已提交复审，请等待质检审核')
+    router.push({ path: '/annotation/review', query: { batch_id: batchId, status: 'pending' } })
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '提交复审失败')
+  } finally {
+    resubmitting.value = false
+  }
+}
 
 function enterWorkspace() {
   if (!selectedDatasetId.value) {
@@ -305,7 +413,9 @@ function onExported() {
 .annotation-workspace {
   display: flex;
   height: calc(100vh - 120px);
+  min-height: 0;
   gap: 8px;
+  overflow: hidden;
 }
 
 .dataset-selector {
@@ -321,6 +431,7 @@ function onExported() {
   background: #fff;
   border-radius: 4px;
   overflow-y: auto;
+  min-height: 0;
   padding: 8px;
   display: flex;
   flex-direction: column;
@@ -365,17 +476,49 @@ function onExported() {
 
 .workspace-center {
   flex: 1;
+  min-width: 0;
+  min-height: 0;
   background: #2c2c2c;
   border-radius: 4px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
+  overflow: auto;
   padding: 12px;
   gap: 12px;
 }
 
+.workspace-center :deep(.image-canvas) {
+  flex: 0 0 auto;
+}
+
 .center-footer {
+  flex-shrink: 0;
+  width: min(800px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.center-footer > .el-button {
+  align-self: flex-start;
+}
+
+.rework-submit {
+  width: 100%;
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.rework-submit :deep(.el-alert) {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+
+.rework-submit :deep(.el-button) {
   flex-shrink: 0;
 }
 
@@ -385,5 +528,29 @@ function onExported() {
   border-radius: 4px;
   padding: 12px;
   overflow-y: auto;
+  min-height: 0;
+}
+
+@media (max-width: 900px) {
+  .annotation-workspace {
+    height: auto;
+    min-height: calc(100vh - 120px);
+    overflow: visible;
+    flex-direction: column;
+  }
+
+  .workspace-left,
+  .workspace-right {
+    width: 100%;
+    max-height: 260px;
+  }
+
+  .workspace-center {
+    min-height: 700px;
+  }
+
+  .rework-submit {
+    flex-direction: column;
+  }
 }
 </style>

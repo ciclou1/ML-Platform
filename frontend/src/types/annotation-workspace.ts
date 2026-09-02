@@ -1,4 +1,4 @@
-import type { BBox } from '@/composables/useCanvas'
+import type { Shape } from '@/composables/useCanvas'
 
 export interface WorkspaceImageItem {
   id: string
@@ -28,10 +28,13 @@ export interface AnnotationViewData {
   label_id: string
   label_name: string
   color: string
+  annotation_type: string
+  data: Record<string, unknown>
+  /** bbox 类型的便捷字段，其余类型为 0 */
   bbox: { x: number; y: number; width: number; height: number }
 }
 
-export type DraftStore = Map<string, BBox[]>
+export type DraftStore = Map<string, Shape[]>
 
 export interface ImageCanvasExpose {
   updateSelectedLabel: (labelId: string, labelName: string, color: string) => void

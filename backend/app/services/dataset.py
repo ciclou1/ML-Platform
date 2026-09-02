@@ -3,9 +3,11 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import delete
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.annotation_shapes import SUPPORTED_ANNOTATION_TYPES
 from app.core.dataset_files import (
     build_yolo_label_file_index,
     resolve_dataset_root_from_image_path,
@@ -13,7 +15,7 @@ from app.core.dataset_files import (
     resolve_yolo_label_path,
 )
 from app.core.storage.factory import get_storage
-from app.exceptions import NotFoundError
+from app.exceptions import ConflictError, NotFoundError, ValidationError
 from app.models.dataset import Dataset, Image, Label
 from app.repositories.dataset import DatasetRepository, ImageRepository
 from app.repositories.dataset_version import DatasetExportRepository, DatasetVersionRepository
@@ -44,12 +46,32 @@ class DatasetService:
         return await self.repo.get_by_id(dataset_id)
 
     async def create_dataset(self, data: DatasetCreate) -> Dataset:
+        if await self.repo.get_by_name(data.name):
+            raise ConflictError("Dataset name already exists")
+        annotation_types = self._normalize_annotation_types(data.annotation_types)
         entity = Dataset(
             name=data.name,
             description=data.description,
             data_type=data.data_type,
+            scene_category=data.scene_category,
+            annotation_types=annotation_types,
         )
-        return await self.repo.create(entity)
+        try:
+            return await self.repo.create(entity)
+        except IntegrityError as exc:
+            await self.session.rollback()
+            raise ConflictError("Dataset name already exists") from exc
+
+    @staticmethod
+    def _normalize_annotation_types(annotation_types: list[str] | None) -> list[str] | None:
+        if not annotation_types:
+            return None
+        unsupported = set(annotation_types) - set(SUPPORTED_ANNOTATION_TYPES)
+        if unsupported:
+            raise ValidationError(
+                f"Unsupported annotation types: {', '.join(sorted(unsupported))}"
+            )
+        return list(dict.fromkeys(annotation_types))
 
     async def update_dataset(
         self, dataset_id: uuid.UUID, data: DatasetUpdate
@@ -149,7 +171,10 @@ class DatasetService:
             return
 
         self.session.add_all(
-            [Label(dataset_id=dataset_id, name=name, sort_order=idx) for idx, name in enumerate(classes)]
+            [
+                Label(dataset_id=dataset_id, name=name, sort_order=idx)
+                for idx, name in enumerate(classes)
+            ]
         )
         await self.session.flush()
 

@@ -1,11 +1,20 @@
+import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.config import settings
+from app.core.auth_middleware import AuthAuditMiddleware
+from app.core.logging import setup_logging
 from app.db.postgres import engine
+from app.exceptions import AppException
 from app.routers import api_router
+
+setup_logging(level=settings.log_level, json_output=settings.log_json)
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -23,16 +32,30 @@ app = FastAPI(
     version="0.1.0",
     summary="平台后端 API 文档",
     openapi_tags=[
-        {"name": "数据集管理", "description": "数据集的创建、查询、更新、删除、图片访问与导入确认。"},
-        {"name": "标注管理", "description": "图片标注的查询、新建、修改、删除与批量替换。"},
+        {
+            "name": "数据集管理",
+            "description": "数据集的创建、查询、更新、删除、图片访问与导入确认。",
+        },
+        {
+            "name": "标注管理",
+            "description": "图片标注的查询、新建、修改、删除与批量替换。",
+        },
         {"name": "标签管理", "description": "数据集类别标签的维护。"},
-        {"name": "模型管理", "description": "模型的注册、导入、查询、更新、删除与权重下载。"},
-        {"name": "任务管理", "description": "训练/评估等任务的创建、启动、同步、取消、删除与产物访问。"},
+        {
+            "name": "模型管理",
+            "description": "模型的注册、导入、查询、更新、删除与权重下载。",
+        },
+        {
+            "name": "任务管理",
+            "description": "训练/评估等任务的创建、启动、同步、取消、删除与产物访问。",
+        },
         {"name": "模型评估", "description": "发起评估任务并返回对应任务记录。"},
         {"name": "模型推理", "description": "基于指定模型对输入图片执行推理。"},
         {"name": "文件上传", "description": "上传数据集压缩包、模型权重或推理图片。"},
         {"name": "统计分析", "description": "平台统计与训练指标占位接口。"},
         {"name": "实时通信", "description": "任务进度与结果的 WebSocket 推送接口。"},
+        {"name": "认证", "description": "用户登录、当前用户信息与密码修改。"},
+        {"name": "系统管理", "description": "用户、角色权限、操作日志与系统配置管理。"},
     ],
     lifespan=lifespan,
 )
@@ -44,6 +67,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(AuthAuditMiddleware)
+
+
+@app.exception_handler(AppException)
+async def app_exception_handler(_: Request, exc: AppException) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled exception")
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
 
 app.include_router(api_router)
 

@@ -3,6 +3,12 @@ import type { RouteRecordRaw } from 'vue-router'
 
 const routes: RouteRecordRaw[] = [
   {
+    path: '/login',
+    name: 'Login',
+    component: () => import('@/views/login/Login.vue'),
+    meta: { title: '登录', public: true },
+  },
+  {
     path: '/',
     component: () => import('@/components/layout/AppLayout.vue'),
     redirect: '/dashboard',
@@ -18,6 +24,12 @@ const routes: RouteRecordRaw[] = [
         name: 'Datasets',
         component: () => import('@/views/data/DatasetList.vue'),
         meta: { title: '数据集管理' },
+      },
+      {
+        path: 'data/videos',
+        name: 'Videos',
+        component: () => import('@/views/data/VideoList.vue'),
+        meta: { title: '视频接入' },
       },
       {
         path: 'data/preprocess',
@@ -110,6 +122,19 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '模型推理' },
       },
       {
+        path: 'algorithm/store',
+        name: 'AlgorithmStore',
+        component: () => import('@/views/algorithm/AlgorithmStore.vue'),
+        meta: { title: '算法商店' },
+      },
+      { path: 'data/preset-alignment', name: 'PresetAlignment', component: () => import('@/views/data/PresetAlignment.vue'), meta: { title: '预置位纠偏' } },
+      {
+        path: 'algorithm/workflows',
+        name: 'WorkflowEditor',
+        component: () => import('@/views/algorithm/WorkflowEditor.vue'),
+        meta: { title: '时序算法组态' },
+      },
+      {
         path: 'system/users',
         name: 'Users',
         component: () => import('@/views/system/UserList.vue'),
@@ -133,6 +158,18 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/system/ConfigPage.vue'),
         meta: { title: '系统配置' },
       },
+      {
+        path: 'system/nodes',
+        name: 'EdgeNodes',
+        component: () => import('@/views/system/NodeList.vue'),
+        meta: { title: '边缘节点' },
+      },
+      {
+        path: ':pathMatch(.*)*',
+        name: 'NotFound',
+        component: () => import('@/views/error/NotFound.vue'),
+        meta: { title: '页面不存在' },
+      },
     ],
   },
 ]
@@ -140,6 +177,24 @@ const routes: RouteRecordRaw[] = [
 const router = createRouter({
   history: createWebHistory(),
   routes,
+})
+
+router.beforeEach((to) => {
+  if (to.meta?.public) {
+    return true
+  }
+  try {
+    const token = localStorage.getItem('auth-token')
+    if (!token) {
+      return { path: '/login', query: { redirect: to.fullPath } }
+    }
+    if (to.path === '/login') {
+      return '/dashboard'
+    }
+  } catch {
+    return { path: '/login' }
+  }
+  return true
 })
 
 export default router

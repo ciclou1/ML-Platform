@@ -19,8 +19,8 @@ YOLOconstructionSiteSeftyDetector-main/
 .env.local
 .env.*.local
 
-# Storage (runtime data)
-storage/
+# Storage (runtime data) — 仅根目录运行期存储，注意不要匹配 backend/app/core/storage/ 源码
+/storage/
 
 # IDE
 .vscode/
@@ -44,3 +44,15 @@ htmlcov/
 
 # Deployment packages
 ai-platform-deploy-*.zip
+
+# Local tool caches
+.pnpm-store/
+backend/.node_agent_cache/
+
+# Test/demo artifacts (weights, sample data) — not part of the codebase
+*.pt
+test-data/
+hymenoptera_data.zip
+video_frames_dataset.zip
+backend/sample_pkg.zip
+backend/test_sample.mp4

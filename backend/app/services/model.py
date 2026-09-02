@@ -104,3 +104,18 @@ class MLModelService:
         if not weight.exists():
             return None
         return {"path": str(weight), "filename": weight.name}
+
+    async def get_lineage(self, model_id: uuid.UUID) -> list[MLModel]:
+        """返回从根模型到指定模型的祖先链（含自身），按训练先后排序。"""
+
+        chain: list[MLModel] = []
+        seen: set[uuid.UUID] = set()
+        current = await self.repo.get_by_id(model_id)
+        while current is not None and current.id not in seen:
+            seen.add(current.id)
+            chain.append(current)
+            if not current.parent_model_id:
+                break
+            current = await self.repo.get_by_id(current.parent_model_id)
+        chain.reverse()
+        return chain

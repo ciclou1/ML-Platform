@@ -2,15 +2,16 @@ import json
 import logging
 import time
 import uuid
-from csv import DictReader
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from csv import DictReader
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.annotation_shapes import infer_model_task
 from app.core.dataset_files import resolve_storage_path
 from app.core.runner.process import ProcessRunner
 from app.core.storage.factory import get_storage
@@ -19,7 +20,7 @@ from app.exceptions import NotFoundError, TaskStateError, ValidationError
 from app.models.dataset_version import DatasetExport, DatasetVersion
 from app.models.model import MLModel
 from app.models.task import TERMINAL_STATUSES, Task, TaskStatus
-from app.repositories.dataset import DatasetRepository
+from app.repositories.dataset import DatasetRepository, ImageRepository, VideoRepository
 from app.repositories.dataset_version import (
     DatasetExportRepository,
     DatasetVersionRepository,
@@ -33,6 +34,10 @@ logger = logging.getLogger(__name__)
 _WORKER_MODULES: dict[str, str] = {
     "training": "app.runners.train_worker",
     "evaluation": "app.runners.eval_worker",
+    "video_import": "app.runners.video_import_worker",
+    "preprocess": "app.runners.preprocess_worker",
+    "package_inference": "app.runners.package_worker",
+    "workflow": "app.runners.workflow_worker",
 }
 _RESULT_SYNC_GRACE_SECONDS = 15
 
@@ -47,6 +52,8 @@ class TaskService:
         self.dataset_repo = DatasetRepository(session)
         self.export_repo = DatasetExportRepository(session)
         self.version_repo = DatasetVersionRepository(session)
+        self.image_repo = ImageRepository(session)
+        self.video_repo = VideoRepository(session)
 
     async def list_tasks(
         self, offset: int = 0, limit: int = 20, task_type: str | None = None
@@ -78,6 +85,8 @@ class TaskService:
             )
             dataset_id = export.dataset_id
             dataset_version_id = export.dataset_version_id
+        elif data.task_type == "preprocess":
+            config = await self._build_preprocess_task_config(config, dataset_id)
 
         entity = Task(
             name=data.name,
@@ -90,14 +99,12 @@ class TaskService:
         )
         return await self.repo.create(entity)
 
-    async def start_task(self, task_id: uuid.UUID) -> Task | None:
+    async def start_task(self, task_id: uuid.UUID) -> Task | None:  # noqa: C901
         entity = await self.repo.get_by_id(task_id)
         if not entity:
             return None
         if entity.status != TaskStatus.PENDING:
-            raise TaskStateError(
-                f"Cannot start task in status {entity.status.value}"
-            )
+            raise TaskStateError(f"Cannot start task in status {entity.status.value}")
 
         config = dict(entity.config or {})
         config["task_id"] = str(task_id)
@@ -116,39 +123,39 @@ class TaskService:
                 raise ValidationError("所选预训练模型缺少权重文件")
 
         if entity.task_type == "training":
-            dataset_export = await self._require_ready_training_export(
-                entity.dataset_export_id
-            )
-            config["data_yaml_path"] = str(
-                resolve_storage_path(str(dataset_export.data_yaml_path))
-            )
+            dataset_export = await self._require_ready_training_export(entity.dataset_export_id)
+            config["data_yaml_path"] = str(resolve_storage_path(str(dataset_export.data_yaml_path)))
             config["training_input_mode"] = "dataset_export"
         elif entity.dataset_export_id:
             dataset_export = await self.export_repo.get_by_id(entity.dataset_export_id)
             if dataset_export and dataset_export.data_yaml_path:
-                config["data_yaml_path"] = str(
-                    resolve_storage_path(dataset_export.data_yaml_path)
-                )
+                config["data_yaml_path"] = str(resolve_storage_path(dataset_export.data_yaml_path))
             else:
                 raise ValidationError("所选数据导出记录缺少 dataset.yaml")
-        elif entity.dataset_id:
+        elif entity.dataset_id and entity.task_type not in {"video_import", "preprocess"}:
             dataset = await self.dataset_repo.get_by_id(entity.dataset_id)
             if dataset and dataset.storage_path:
-                config["data_yaml_path"] = str(
-                    resolve_storage_path(dataset.storage_path)
-                )
+                config["data_yaml_path"] = str(resolve_storage_path(dataset.storage_path))
             else:
                 raise ValidationError("所选数据集缺少 data.yaml 配置")
 
         config["project_dir"] = str(StoragePaths.run_root(task_id))
         config["run_name"] = (
-            "eval" if entity.task_type == "evaluation" else "train"
+            "eval"
+            if entity.task_type == "evaluation"
+            else "preprocess"
+            if entity.task_type == "preprocess"
+            else "train"
         )
+        if entity.task_type == "training" and not config.get("model_task"):
+            config["model_task"] = await self._infer_model_task(entity.dataset_id)
+        if entity.task_type == "training" and config.get("model_task") == "classify":
+            config["data_yaml_path"] = str(Path(str(config["data_yaml_path"])).parent)
 
         result = await self.runner.run(str(task_id), config)
         entity.config = config
         entity.status = TaskStatus.RUNNING
-        entity.started_at = datetime.now(timezone.utc)
+        entity.started_at = datetime.now(UTC)
         entity.worker_pid = result.get("pid")
         return await self.repo.update(entity)
 
@@ -160,14 +167,68 @@ class TaskService:
             return entity
         await self.runner.cancel(str(task_id))
         entity.status = TaskStatus.CANCELLED
-        entity.finished_at = datetime.now(timezone.utc)
+        entity.finished_at = datetime.now(UTC)
+        if entity.task_type == "video_import":
+            await self._set_video_status(entity, "failed")
         return await self.repo.update(entity)
+
+    async def create_resume_task(self, task_id: uuid.UUID) -> Task:
+        """从失败/取消的训练任务创建断点续训任务。
+
+        续训沿用原任务配置与数据集绑定，worker 通过 config.resume_from
+        指向原任务 run 目录下的 last.pt，由框架恢复训练状态。
+        """
+        entity = await self.repo.get_by_id(task_id)
+        if not entity:
+            raise NotFoundError("Task not found")
+        if entity.task_type != "training":
+            raise ValidationError("仅训练任务支持断点续训")
+        if entity.status not in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
+            raise TaskStateError(f"仅失败或已取消的任务可以续训，当前状态 {entity.status.value}")
+
+        last_weight = StoragePaths.task_run_dir(task_id, "train") / "weights" / "last.pt"
+        if not last_weight.exists():
+            raise ValidationError("原任务没有可续训的 last.pt 权重文件")
+
+        config = dict(entity.config or {})
+        config.pop("task_id", None)
+        config.pop("worker_module", None)
+        config["resume_from"] = str(last_weight)
+
+        new_task = Task(
+            name=f"{entity.name}-resume",
+            task_type="training",
+            model_id=entity.model_id,
+            dataset_id=entity.dataset_id,
+            dataset_version_id=entity.dataset_version_id,
+            dataset_export_id=entity.dataset_export_id,
+            config=config,
+        )
+        new_task = await self.repo.create(new_task)
+        await self._copy_task_artifact(task_id, new_task.id, "history.json")
+        return new_task
+
+    async def _copy_task_artifact(
+        self, source_task_id: uuid.UUID, target_task_id: uuid.UUID, filename: str
+    ) -> None:
+        """复制任务目录下的小型 JSON 产物（如历史指标），失败不影响主流程。"""
+
+        source_relative = self._storage_relative(StoragePaths.task_root(source_task_id) / filename)
+        try:
+            content = await self.storage.load(source_relative)
+        except OSError:
+            return
+        target_relative = self._storage_relative(StoragePaths.task_root(target_task_id) / filename)
+        try:
+            await self.storage.save(target_relative, content)
+        except (OSError, ValueError):
+            logger.warning("Failed to copy %s from task %s", filename, source_task_id)
 
     async def get_progress(self, task_id: uuid.UUID) -> dict[str, Any]:
         progress = await self.runner.get_progress(str(task_id))
         return {"task_id": str(task_id), "progress": progress}
 
-    async def sync_result(self, task_id: uuid.UUID) -> Task | None:
+    async def sync_result(self, task_id: uuid.UUID) -> Task | None:  # noqa: C901
         entity = await self.repo.get_by_id(task_id)
         if not entity or entity.status in TERMINAL_STATUSES:
             return entity
@@ -180,7 +241,9 @@ class TaskService:
                     return entity
                 entity.status = TaskStatus.FAILED
                 entity.error_message = "训练进程已退出，但未生成结果文件"
-                entity.finished_at = datetime.now(timezone.utc)
+                entity.finished_at = datetime.now(UTC)
+                if entity.task_type == "video_import":
+                    await self._set_video_status(entity, "failed")
                 return await self.repo.update(entity)
             return entity
 
@@ -188,13 +251,26 @@ class TaskService:
             entity.status = TaskStatus.COMPLETED
             entity.result = result
             entity.progress = 100
-            entity.finished_at = datetime.now(timezone.utc)
+            entity.finished_at = datetime.now(UTC)
+            if entity.task_type == "video_import":
+                await self._apply_video_import_result(entity)
         elif result.get("status") == TaskStatus.FAILED.value:
             entity.status = TaskStatus.FAILED
             entity.error_message = result.get("error", "Unknown error")
             entity.result = result
-            entity.finished_at = datetime.now(timezone.utc)
+            entity.finished_at = datetime.now(UTC)
+            if entity.task_type == "video_import":
+                await self._set_video_status(entity, "failed")
         return await self.repo.update(entity)
+
+    async def _set_video_status(self, entity: Task, status: str) -> None:
+        video_id = (entity.config or {}).get("video_id")
+        if not video_id:
+            return
+        video = await self.video_repo.get_by_id(uuid.UUID(str(video_id)))
+        if video:
+            video.status = status
+            await self.video_repo.update(video)
 
     async def delete_task(self, task_id: uuid.UUID) -> bool:
         entity = await self.repo.get_by_id(task_id)
@@ -205,6 +281,60 @@ class TaskService:
         await self._delete_task_artifacts(task_id)
         await self.repo.delete(entity)
         return True
+
+    async def _apply_video_import_result(self, entity: Task) -> None:
+        """抽帧任务完成后，把 manifest 中的帧落库为 Image 记录并更新 Video。"""
+
+        from app.models.dataset import Image
+
+        config = entity.config or {}
+        video_id_str = config.get("video_id")
+        if not video_id_str:
+            return
+        video = await self.video_repo.get_by_id(uuid.UUID(str(video_id_str)))
+        if not video:
+            return
+
+        await self.image_repo.delete_by_video(video.id)
+
+        split = str(config.get("split") or "train")
+        for frame in (entity.result or {}).get("frames") or []:
+            await self.image_repo.create(
+                Image(
+                    dataset_id=video.dataset_id,
+                    filename=str(frame["filename"]),
+                    file_path=str(frame["file_path"]),
+                    width=int(frame["width"]),
+                    height=int(frame["height"]),
+                    split=split,
+                    annotation_status="unannotated",
+                    video_id=video.id,
+                    frame_index=int(frame["frame_index"]),
+                )
+            )
+
+        video.fps = (entity.result or {}).get("fps")
+        video.duration_s = (entity.result or {}).get("duration_s")
+        video.frame_count = int((entity.result or {}).get("frame_count") or 0)
+        video.status = "processed"
+        await self.video_repo.update(video)
+        dataset = await self.dataset_repo.get_by_id(video.dataset_id)
+        if dataset:
+            dataset.train_count = await self.image_repo.count_by_dataset_and_split(
+                dataset.id, "train"
+            )
+            dataset.val_count = await self.image_repo.count_by_dataset_and_split(dataset.id, "val")
+            dataset.test_count = await self.image_repo.count_by_dataset_and_split(
+                dataset.id, "test"
+            )
+            await self.dataset_repo.update(dataset)
+
+    async def _infer_model_task(self, dataset_id: uuid.UUID | None) -> str:
+        if not dataset_id:
+            return "detect"
+        dataset = await self.dataset_repo.get_by_id(dataset_id)
+        types = [str(item) for item in (dataset.annotation_types or [])] if dataset else []
+        return infer_model_task(types)
 
     async def _delete_task_artifacts(self, task_id: uuid.UUID) -> None:
         task_relative_path = self._storage_relative(StoragePaths.task_root(task_id))
@@ -243,29 +373,33 @@ class TaskService:
         if not entity:
             return []
 
-        run_name = "eval" if entity.task_type == "evaluation" else "train"
-        run_dir = StoragePaths.task_run_dir(task_id, run_name)
+        if entity.task_type == "preprocess":
+            run_dir = StoragePaths.task_output_root(task_id)
+            artifact_names = ["output.zip", "manifest.json"]
+        else:
+            run_name = "eval" if entity.task_type == "evaluation" else "train"
+            run_dir = StoragePaths.task_run_dir(task_id, run_name)
+            artifact_names = [
+                "results.png",
+                "results.csv",
+                "labels.jpg",
+                "train_batch0.jpg",
+                "train_batch1.jpg",
+                "train_batch2.jpg",
+                "train_batch3.jpg",
+                "train_batch4.jpg",
+                "val_batch0_labels.jpg",
+                "val_batch0_pred.jpg",
+                "confusion_matrix.png",
+                "confusion_matrix_normalized.png",
+                "BoxPR_curve.png",
+                "BoxP_curve.png",
+                "BoxR_curve.png",
+                "BoxF1_curve.png",
+                "predictions.json",
+            ]
         if not run_dir.exists():
             return []
-
-        artifact_names = [
-            "results.png",
-            "results.csv",
-            "labels.jpg",
-            "train_batch0.jpg",
-            "train_batch1.jpg",
-            "train_batch2.jpg",
-            "train_batch3.jpg",
-            "train_batch4.jpg",
-            "val_batch0_labels.jpg",
-            "val_batch0_pred.jpg",
-            "confusion_matrix.png",
-            "confusion_matrix_normalized.png",
-            "BoxPR_curve.png",
-            "BoxP_curve.png",
-            "BoxR_curve.png",
-            "BoxF1_curve.png",
-        ]
         items: list[TaskArtifactItem] = []
         for filename in artifact_names:
             path = run_dir / filename
@@ -284,11 +418,20 @@ class TaskService:
         task_id: uuid.UUID,
         filename: str,
     ) -> Path | None:
+        # Artifacts are always direct children of the task output directory.
+        if not filename or Path(filename).name != filename:
+            return None
         entity = await self.repo.get_by_id(task_id)
         if not entity:
             return None
-        run_name = "eval" if entity.task_type == "evaluation" else "train"
-        path = StoragePaths.task_run_dir(task_id, run_name) / filename
+        root = (
+            StoragePaths.task_output_root(task_id)
+            if entity.task_type == "preprocess"
+            else StoragePaths.task_run_dir(
+                task_id, "eval" if entity.task_type == "evaluation" else "train"
+            )
+        )
+        path = root / filename
         if not path.exists() or not path.is_file():
             return None
         return path
@@ -333,6 +476,8 @@ class TaskService:
             model_source="trained",
             status="ready",
             dataset_id=entity.dataset_id,
+            parent_model_id=entity.model_id,
+            model_task=config.get("model_task", "detect"),
             metrics=metrics,
         )
         model = await self.model_repo.create(model)
@@ -412,9 +557,7 @@ class TaskService:
         task_id: uuid.UUID,
         filename: str,
     ) -> dict[str, Any] | list[dict[str, Any]] | None:
-        relative_path = self._storage_relative(
-            StoragePaths.task_root(task_id) / filename
-        )
+        relative_path = self._storage_relative(StoragePaths.task_root(task_id) / filename)
         if not await self.storage.exists(relative_path):
             return None
         try:
@@ -487,20 +630,52 @@ class TaskService:
         if not export:
             raise NotFoundError("训练输入导出记录不存在")
         if export.status != "success":
-            raise ValidationError(
-                "训练输入导出记录尚未准备完成，请选择已成功导出的记录"
-            )
+            raise ValidationError("训练输入导出记录尚未准备完成，请选择已成功导出的记录")
         if not export.data_yaml_path:
             raise ValidationError("训练输入导出记录缺少 dataset.yaml，无法启动训练")
         return export
 
-    async def _get_dataset_version_or_raise(
-        self, version_id: uuid.UUID
-    ) -> DatasetVersion:
+    async def _get_dataset_version_or_raise(self, version_id: uuid.UUID) -> DatasetVersion:
         version = await self.version_repo.get_by_id(version_id)
         if not version:
             raise NotFoundError("训练输入对应的数据集版本不存在")
         return version
+
+    async def _build_preprocess_task_config(
+        self,
+        config: dict[str, Any],
+        dataset_id: uuid.UUID | None,
+    ) -> dict[str, Any]:
+        if not dataset_id:
+            raise ValidationError("预处理任务必须选择数据集")
+        dataset = await self.dataset_repo.get_by_id(dataset_id)
+        if not dataset:
+            raise NotFoundError("Dataset not found")
+
+        preprocess_type = str(config.get("preprocess_type") or "resize")
+        if preprocess_type not in {"resize", "augmentation", "format_convert", "split"}:
+            raise ValidationError(f"不支持的预处理类型: {preprocess_type}")
+        images = await self.image_repo.list_by_dataset(dataset_id, offset=0, limit=100000)
+        if not images:
+            raise ValidationError("数据集没有可处理的图片")
+
+        enriched = dict(config)
+        enriched["preprocess_type"] = preprocess_type
+        enriched["source_images"] = [
+            {
+                "id": str(image.id),
+                "filename": image.filename,
+                "file_path": str(resolve_storage_path(image.file_path)),
+                "split": image.split,
+            }
+            for image in images
+        ]
+        enriched.setdefault("width", 640)
+        enriched.setdefault("height", 640)
+        enriched.setdefault("output_format", "jpg")
+        enriched.setdefault("split_ratios", {"train": 0.8, "val": 0.1, "test": 0.1})
+        enriched["dataset_name"] = dataset.name
+        return enriched
 
     async def _build_training_task_config(
         self,
@@ -588,11 +763,7 @@ class TaskService:
         if not split_counts:
             return "--"
         ordered = ["train", "val", "test"]
-        parts = [
-            f"{split} {split_counts[split]}"
-            for split in ordered
-            if split in split_counts
-        ]
+        parts = [f"{split} {split_counts[split]}" for split in ordered if split in split_counts]
         if not parts:
             parts = [f"{split} {count}" for split, count in split_counts.items()]
         return " / ".join(parts)

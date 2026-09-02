@@ -1,126 +1,185 @@
-# AI Platform - 数据标注与模型训练平台
+# AI Platform
 
-基于 FastAPI + Vue 3 的 AI 数据标注与模型训练管理平台。
+本项目是单机部署的 AI 数据标注、数据版本、模型训练、评估和边缘推理平台。
 
-## 技术栈
+- 后端：FastAPI、SQLAlchemy Async、Alembic、PostgreSQL
+- 前端：Vue 3、Vite、TypeScript、Element Plus、Vue Flow
+- 存储：本地 `storage/` 目录
+- 运行时：Windows 本地开发使用 Python 3.12、uv、pnpm；PostgreSQL 使用 Docker Compose
 
-| 层 | 技术 |
-|---|---|
-| 后端 | Python 3.11+ / FastAPI / SQLAlchemy 2.x / Alembic |
-| 前端 | Vue 3 / Vite / TypeScript / Element Plus / Pinia |
-| 数据库 | PostgreSQL |
-| 依赖管理 | 后端 uv / 前端 pnpm |
+## 功能概览
 
-## 项目结构
+### 数据与标注
+
+- 数据集、标签、图片和视频样本管理
+- 视频上传、抽帧和帧图像落库
+- bbox、多边形、旋转框、关键点和图级分类标注
+- 标注导出、数据集版本冻结、自动 train/val/test 划分
+- 图像侧预置位纠偏：相位相关估计偏移后批量修正标注坐标
+
+### 模型与评估
+
+- 模型权重导入、下载、训练产物导出和模型谱系
+- 训练任务、日志、进度、取消和断点续训
+- YOLO detect、segment、OBB、pose、classify 任务推断
+- 评估任务、分类别指标、F-beta、加权指标和自定义算法包指标
+- 模型推理工作区
+
+### 算法与边缘
+
+- 算法 ZIP 导入、发布、弃用、下载和本地子进程推理
+- 边缘节点注册、心跳、部署、远程推理和结果回传
+- 发电机、水轮机、主变图像检测模板种子脚本
+
+### 时序组态
+
+- Vue Flow 拖拽编辑器
+- CSV 上传和子进程工作流执行
+- 50+ CSV 算子，支持筛选、排序、去重、字段处理和聚合
+- 节点连线、删除、保存、重新加载和任务结果展示
+
+## 目录结构
 
 ```text
-backend/           后端 API 服务
-frontend/          前端 SPA
-storage/           运行期文件存储
-.claude/skills/    项目规则与约束
+backend/                 FastAPI 服务、迁移、worker 和测试
+frontend/                Vue 单页应用
+storage/                 运行时数据，不提交到 Git
+  datasets/              数据集文件
+  exports/               数据版本导出物
+  tasks/                 worker 配置、日志、结果
+  runs/                  训练和评估产物
+  models/                已导入和训练产出模型
+  packages/              算法包版本
+  workflows/             CSV 工作流输入
 ```
 
-## 快速启动
+所有运行时路径必须通过 `backend/app/core/storage/paths.py` 的 `StoragePaths` 生成。
 
-### 后端
+## 本地启动
 
-```bash
+### 前置条件
+
+- Python 3.12
+- Node.js 20+ 与 pnpm 9+
+- Docker Desktop
+- Windows PowerShell
+
+本地 PyTorch 使用 CPU wheel，避免部分 Windows CUDA wheel 的 `c10.dll` 初始化问题。GPU 训练需要单独维护兼容的 CUDA PyTorch 运行时或容器环境。
+
+### 1. 启动 PostgreSQL
+
+```powershell
+docker compose up -d postgres
+```
+
+### 2. 启动后端
+
+```powershell
 cd backend
-cp .env.example .env
-uv sync
-uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+Copy-Item .env.example .env
+uv sync --extra dev
+uv run alembic upgrade head
+uv run python run.py
 ```
 
-启动后访问：
+后端地址：`http://127.0.0.1:8000`
 
-- Swagger: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
-- 健康检查: `http://localhost:8000/api/v1/health`
+- 健康检查：`/api/v1/health`
+- OpenAPI：`/docs`
 
-### 前端
+Windows 下请使用 `run.py` 启动。它会设置与 psycopg Async 兼容的事件循环策略。
 
-```bash
+### 3. 启动前端
+
+```powershell
 cd frontend
 pnpm install
 pnpm dev
 ```
 
-启动后访问：
+默认前端地址：`http://127.0.0.1:5173`
 
-- 前端开发地址：`http://localhost:5173`
+开发环境请求始终通过 Vite 的 `/api` 代理访问后端。不要在 `frontend/.env.development` 中配置直连后端地址。
 
-## Docker 部署
+## 训练输入流程
 
-项目提供了基于 `docker-compose.yml` 的单机部署方案，包含：
+训练任务不直接使用原始 ZIP 或数据集目录，而是使用成功的数据版本导出记录。
 
-- `postgres`: 元数据数据库
-- `backend`: FastAPI 后端服务
-- `frontend`: Nginx 承载前端静态站点，并反向代理 `/api` 和 WebSocket
+1. 在“数据集管理”导入图片或视频帧，并完成标签与标注。
+2. 在“数据集版本 / 导出记录”创建版本。
+3. 推荐选择“按比例自动划分”，至少生成 `train` 和 `val`。
+4. 发起 YOLO 导出，等待导出状态为 `success`。
+5. 在“模型管理”导入预训练权重。
+6. 在“训练任务”选择“训练输入数据”中的成功导出记录。选择导出后，所属数据集和版本会自动同步。
 
-### 先打包代码再上传服务器
+检测训练需要 YOLO bbox 标签。图像分类训练需要图级分类标注和分类模型权重。未标注图片可参与数据集版本，但会降低训练有效样本比例。
 
-如果需要先打包项目代码再上传到服务器，可以在项目根目录执行：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\package-deploy.ps1
-```
-
-执行后会在项目根目录生成形如 `ai-platform-deploy-YYYYMMDD.zip` 的部署包，并自动清理旧的同名前缀部署包。
-
-### 服务器部署步骤
-
-先把部署包上传到服务器，然后执行：
-
-```bash
-unzip ai-platform-deploy-YYYYMMDD.zip -d ai-platform
-cd ai-platform
-cp docker.env.example .env
-docker compose --env-file .env up -d --build
-```
-
-说明：
-
-- 需要先解压，再进入解压后的项目目录执行 `docker compose`
-- `docker compose --build` 会直接读取当前目录下的 `docker-compose.yml`、`backend/`、`frontend/` 等源码文件，因此不能直接对 zip 文件执行
-- 运行期文件会挂载到项目根目录 `storage/`
-- 后端容器启动时会自动执行 `alembic upgrade head`
-- 如需 GPU 训练，需要在宿主机安装 NVIDIA Container Toolkit，并保证 Docker 可访问 GPU
-
-启动后访问：
-
-- 前端：`http://localhost:18080`
-- 后端： `http://localhost:18000`
-- 后端健康检查：`http://localhost:18000/api/v1/health`
-
-## 核心模块
-
-| 模块 | 说明 |
-|---|---|
-| 数据集管理 | 上传、导入、标注入口、训练数据准备 |
-| 标注工作台 | 图片标注、类别管理、导出标注结果 |
-| 模型管理 | 模型注册、训练产物管理 |
-| 训练任务 | 创建、监控、取消训练任务 |
-| 模型评估 | 评估任务与结果展示 |
-| 推理能力 | 图片推理与结果查看 |
-
-## API 概览
+## 常用接口
 
 ```text
 GET/POST    /api/v1/datasets
+GET/POST    /api/v1/dataset-versions
+GET/POST    /api/v1/dataset-exports
 GET/POST    /api/v1/models
 GET/POST    /api/v1/tasks
 
-GET/POST    /api/v1/datasets/{id}/labels
-GET         /api/v1/images/{id}/annotations
-POST        /api/v1/annotations
+GET/POST    /api/v1/images/{id}/annotations
+POST        /api/v1/images/{id}/preset-alignment/estimate
+POST        /api/v1/images/{id}/preset-alignment/apply
 
-POST        /api/v1/inference
-POST        /api/v1/evaluation
+GET/POST    /api/v1/videos
+POST        /api/v1/evaluation/run
+GET/POST    /api/v1/algorithm-packages
+GET/POST    /api/v1/nodes
+GET/POST    /api/v1/workflows
 ```
 
-## 架构原则
+## 算法模板与节点代理
 
-- 分层结构：Router -> Service -> Repository -> Model
-- 存储抽象：默认本地存储，预留扩展空间
-- 任务抽象：训练/评估任务通过统一任务模型管理
-- 框架适配：`backend/app/frameworks/` 下按训练框架扩展
+创建行业模板：
+
+```powershell
+cd backend
+uv run python scripts/seed_equipment_templates.py
+```
+
+启动边缘节点代理：
+
+```powershell
+cd backend
+uv run python scripts/node_agent.py --base http://127.0.0.1:8000/api/v1 --node-id <node-id> --token <token>
+```
+
+## 测试与检查
+
+```powershell
+cd backend
+uv run --extra dev python -m pytest tests -q
+
+cd ../frontend
+pnpm test
+pnpm build
+```
+
+后端测试覆盖核心算法、模型表结构、Router、Service、worker 和模板契约。前端测试覆盖 API 基地址与 Vite 代理选择。
+
+## Docker 部署
+
+```bash
+docker compose --env-file .env up -d --build
+```
+
+容器访问地址：
+
+- 前端：`http://localhost:18080`
+- 后端：`http://localhost:18000`
+
+容器启动时会执行 `alembic upgrade head`。生产环境应通过根目录 `.env` 设置 PostgreSQL 密码、CORS 来源和存储配置。
+
+## 当前约束
+
+- 数据库迁移当前版本：`0010`
+- 训练、评估和推理是独立业务链路
+- framework 适配层不访问数据库
+- 运行期文件不提交到 Git
+- GPU 训练、分割和 OBB 的真实端到端验证需要兼容的 CUDA 运行时与权重

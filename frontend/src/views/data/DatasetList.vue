@@ -34,13 +34,20 @@
       </el-table-column>
     </el-table>
 
-    <el-dialog v-model="showCreate" title="新建数据集" width="400px">
+    <el-dialog v-model="showCreate" title="新建数据集" width="420px">
       <el-form label-width="80px">
         <el-form-item label="名称">
           <el-input v-model="createForm.name" />
         </el-form-item>
         <el-form-item label="描述">
           <el-input v-model="createForm.description" type="textarea" />
+        </el-form-item>
+        <el-form-item label="标注类型">
+          <el-checkbox-group v-model="createForm.annotation_types">
+            <el-checkbox v-for="item in ANNOTATION_TYPE_OPTIONS" :key="item.value" :value="item.value">
+              {{ item.label }}
+            </el-checkbox>
+          </el-checkbox-group>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -95,16 +102,17 @@
 
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 import { UploadFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UploadInstance } from 'element-plus'
-import { createDataset, deleteDataset, getDatasets } from '@/api/dataset'
 import { confirmDatasetImport, detectDatasetStructure, uploadDatasetZip } from '@/api/upload'
 import type { DetectResult } from '@/api/upload'
-import type { Dataset } from '@/types/dataset'
+import { useDatasetStore } from '@/stores/dataset'
 
-const datasets = ref<Dataset[]>([])
+const datasetStore = useDatasetStore()
+const { datasets } = storeToRefs(datasetStore)
 const showCreate = ref(false)
 const showUpload = ref(false)
 const uploading = ref(false)
@@ -112,8 +120,16 @@ const activeDatasetId = ref('')
 const uploadRef = ref<UploadInstance>()
 const router = useRouter()
 
-const createForm = reactive({ name: '', description: '' })
+const createForm = reactive({ name: '', description: '', annotation_types: [] as string[] })
 let zipFile: File | null = null
+
+const ANNOTATION_TYPE_OPTIONS = [
+  { value: 'bbox', label: '检测框' },
+  { value: 'polygon', label: '多边形' },
+  { value: 'obb', label: '旋转框' },
+  { value: 'keypoint', label: '关键点' },
+  { value: 'classify', label: '整图分类' },
+]
 
 const STATUS_CONFIG: Record<string, { type: 'info' | 'success' | 'warning'; label: string }> = {
   ready: { type: 'info', label: '待标注' },
@@ -121,11 +137,7 @@ const STATUS_CONFIG: Record<string, { type: 'info' | 'success' | 'warning'; labe
   importing: { type: 'warning', label: '导入中' },
 }
 
-onMounted(loadDatasets)
-
-async function loadDatasets() {
-  datasets.value = await getDatasets()
-}
+onMounted(() => datasetStore.load())
 
 async function handleCreate() {
   if (!createForm.name) {
@@ -134,11 +146,16 @@ async function handleCreate() {
   }
 
   try {
-    const created = await createDataset(createForm)
+    const created = await datasetStore.create({
+      ...createForm,
+      annotation_types: createForm.annotation_types.length
+        ? createForm.annotation_types
+        : undefined,
+    })
     showCreate.value = false
     createForm.name = ''
     createForm.description = ''
-    await loadDatasets()
+    createForm.annotation_types = []
     openUploadDialog(created.id)
   } catch (err: unknown) {
     ElMessage.error(readErrorDetail(err) || '创建失败')
@@ -198,7 +215,7 @@ async function confirmImport(datasetId: string, result: DetectResult) {
     classes: Array.isArray(result.classes) ? result.classes : [],
     splits: result.splits,
   })
-  await loadDatasets()
+  await datasetStore.load()
 }
 
 function goAnnotate(datasetId: string) {
@@ -208,9 +225,8 @@ function goAnnotate(datasetId: string) {
 async function handleDelete(id: string) {
   try {
     await ElMessageBox.confirm('确定删除该数据集吗？', '确认', { type: 'warning' })
-    await deleteDataset(id)
+    await datasetStore.remove(id)
     ElMessage.success('已删除')
-    await loadDatasets()
   } catch {
     // cancelled
   }

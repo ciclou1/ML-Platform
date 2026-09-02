@@ -19,4 +19,8 @@ class MLModel(UUIDMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(20), default="ready")
     model_source: Mapped[str] = mapped_column(String(20), default="pretrained")
     dataset_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("datasets.id"))
+    parent_model_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("models.id", ondelete="SET NULL")
+    )
+    model_task: Mapped[str] = mapped_column(String(20), default="detect")
     metrics: Mapped[dict | None] = mapped_column(JSON)

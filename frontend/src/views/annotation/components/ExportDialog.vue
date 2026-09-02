@@ -22,12 +22,28 @@
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { exportAnnotated } from '@/api/dataset'
-import type { BBox } from '@/composables/useCanvas'
+import type { Shape } from '@/composables/useCanvas'
+
+function shapeToData(shape: Shape): Record<string, unknown> {
+  if (shape.type === 'classify') {
+    return {}
+  }
+  if (shape.type === 'bbox') {
+    return { x: shape.x, y: shape.y, width: shape.width, height: shape.height }
+  }
+  if (shape.type === 'polygon') {
+    return { points: shape.points }
+  }
+  if (shape.type === 'obb') {
+    return { cx: shape.cx, cy: shape.cy, w: shape.w, h: shape.h, angle: shape.angle }
+  }
+  return { bbox: shape.bbox, points: shape.points }
+}
 
 const props = defineProps<{
   visible: boolean
   datasetId: string
-  draftStore: Map<string, BBox[]>
+  draftStore: Map<string, Shape[]>
   annotatedCount: number
   totalBoxCount: number
 }>()
@@ -48,11 +64,15 @@ async function handleExport() {
 
   exporting.value = true
   try {
-    const annotations: Record<string, { label_id: string; bbox: Record<string, number> }[]> = {}
-    for (const [imageId, boxes] of props.draftStore.entries()) {
-      annotations[imageId] = boxes.map((b) => ({
-        label_id: b.labelId,
-        bbox: { x: b.x, y: b.y, width: b.width, height: b.height },
+    const annotations: Record<
+      string,
+      { label_id: string; annotation_type: string; data: Record<string, unknown> }[]
+    > = {}
+    for (const [imageId, shapes] of props.draftStore.entries()) {
+      annotations[imageId] = shapes.map((shape) => ({
+        label_id: shape.labelId,
+        annotation_type: shape.type,
+        data: shapeToData(shape),
       }))
     }
 

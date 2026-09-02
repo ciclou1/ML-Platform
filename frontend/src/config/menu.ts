@@ -2,6 +2,8 @@ export interface MenuItem {
   path: string
   title: string
   icon?: string
+  /** 访问该菜单所需权限点，缺省为登录即可见 */
+  permission?: string
   children?: MenuItem[]
 }
 
@@ -13,7 +15,9 @@ export const menuConfig: MenuItem[] = [
     icon: 'Files',
     children: [
       { path: '/data/datasets', title: '数据集管理' },
+      { path: '/data/videos', title: '视频接入' },
       { path: '/data/preprocess', title: '预处理任务' },
+      { path: '/data/preset-alignment', title: '预置位纠偏' },
       { path: '/data/versions', title: '版本 / 导出记录' },
     ],
   },
@@ -37,12 +41,16 @@ export const menuConfig: MenuItem[] = [
       { path: '/model/evaluation', title: '模型评估' },
       { path: '/model/evaluation-history', title: '评估历史' },
       { path: '/model/inference', title: '模型推理' },
+      { path: '/algorithm/store', title: '算法商店' },
+      { path: '/algorithm/workflows', title: '时序算法组态' },
+      { path: '/system/nodes', title: '边缘节点', permission: 'node:manage' },
     ],
   },
   {
     path: '/system',
     title: '系统管理',
     icon: 'Setting',
+    permission: 'system:manage',
     children: [
       { path: '/system/users', title: '用户管理' },
       { path: '/system/roles', title: '角色权限' },

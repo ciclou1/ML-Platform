@@ -1,24 +1,36 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import type { BBox } from '@/composables/useCanvas'
+import type { Shape, ShapeType } from '@/composables/useCanvas'
 
-type DraftDatasetMap = Record<string, Record<string, BBox[]>>
+type DraftDatasetMap = Record<string, Record<string, Shape[]>>
 
 const STORAGE_KEY = 'annotation-draft-store'
+const SHAPE_TYPES: ShapeType[] = ['bbox', 'polygon', 'obb', 'keypoint']
 
-function isBBox(value: unknown): value is BBox {
+function isShape(value: unknown): value is Shape {
   if (!value || typeof value !== 'object') {
     return false
   }
   const row = value as Record<string, unknown>
-  return typeof row.id === 'string'
-    && typeof row.x === 'number'
-    && typeof row.y === 'number'
-    && typeof row.width === 'number'
-    && typeof row.height === 'number'
-    && typeof row.labelId === 'string'
-    && typeof row.labelName === 'string'
-    && typeof row.color === 'string'
+  if (typeof row.id !== 'string' || typeof row.labelId !== 'string') {
+    return false
+  }
+  if (!SHAPE_TYPES.includes(row.type as ShapeType)) {
+    return false
+  }
+  if (row.type === 'bbox') {
+    return typeof row.x === 'number' && typeof row.y === 'number'
+      && typeof row.width === 'number' && typeof row.height === 'number'
+  }
+  if (row.type === 'polygon') {
+    return Array.isArray(row.points)
+  }
+  if (row.type === 'obb') {
+    return typeof row.cx === 'number' && typeof row.cy === 'number'
+      && typeof row.w === 'number' && typeof row.h === 'number'
+      && typeof row.angle === 'number'
+  }
+  return typeof row.bbox === 'object' && Array.isArray(row.points)
 }
 
 function normalizeDraftStore(raw: unknown): DraftDatasetMap {
@@ -33,11 +45,11 @@ function normalizeDraftStore(raw: unknown): DraftDatasetMap {
     }
     const images = datasetValue as Record<string, unknown>
     next[datasetId] = {}
-    for (const [imageId, boxesValue] of Object.entries(images)) {
-      if (!Array.isArray(boxesValue)) {
+    for (const [imageId, shapesValue] of Object.entries(images)) {
+      if (!Array.isArray(shapesValue)) {
         continue
       }
-      next[datasetId][imageId] = boxesValue.filter(isBBox)
+      next[datasetId][imageId] = shapesValue.filter(isShape)
     }
   }
   return next
@@ -64,18 +76,18 @@ export const useAnnotationDraftStore = defineStore('annotationDraft', () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(drafts.value))
   }
 
-  function setImageDraft(datasetId: string, imageId: string, boxes: BBox[]) {
+  function setImageDraft(datasetId: string, imageId: string, shapes: Shape[]) {
     drafts.value = {
       ...drafts.value,
       [datasetId]: {
         ...(drafts.value[datasetId] || {}),
-        [imageId]: boxes.map((box) => ({ ...box })),
+        [imageId]: shapes.map((shape) => ({ ...shape })),
       },
     }
     persist()
   }
 
-  function getImageDraft(datasetId: string, imageId: string): BBox[] {
+  function getImageDraft(datasetId: string, imageId: string): Shape[] {
     return drafts.value[datasetId]?.[imageId] || []
   }
 
@@ -112,7 +124,7 @@ export const useAnnotationDraftStore = defineStore('annotationDraft', () => {
 
   function listDraftImageIds(datasetId: string): string[] {
     return Object.entries(drafts.value[datasetId] || {})
-      .filter(([, boxes]) => boxes.length > 0)
+      .filter(([, shapes]) => shapes.length > 0)
       .map(([imageId]) => imageId)
   }
 
